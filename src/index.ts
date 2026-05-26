@@ -24,10 +24,70 @@ interface Env {
   DISCORD_TOKEN: string;
   WATCH_CHANNELS: string;
   WEBHOOK_URL: string;
+  CONTINUITY_WORKER_URL?: string;
+  CONTINUITY_API_KEY?: string;
   DASHBOARD_TOKEN?: string;
   DISCORD_CLIENT_ID?: string;
   DISCORD_CLIENT_SECRET?: string;
   ADMIN_DISCORD_ID?: string;
+}
+
+function normalizeCompanionId(id: string): string {
+  const raw = String(id || '').trim().toLowerCase();
+  const aliases: Record<string, string> = {
+    kai: 'kaisoryth',
+    kaisoryth: 'kaisoryth',
+    lucian: 'lucien',
+    lucien: 'lucien',
+    mor: 'morzar',
+    morzar: 'morzar',
+    keth: 'kethtahl',
+    kethtahl: 'kethtahl',
+  };
+  return aliases[raw] || raw;
+}
+
+async function postContinuityEvent(env: Env, event: {
+  companion_id: string;
+  conversation_id: string;
+  external_message_id: string;
+  role: 'human' | 'companion' | 'system' | 'tool';
+  author?: unknown;
+  content: string;
+  created_at?: string;
+  reply_to?: string | null;
+  metadata?: Record<string, unknown>;
+  raw?: unknown;
+  pre_response_required?: boolean;
+}) {
+  const base = (env.CONTINUITY_WORKER_URL || '').replace(/\/+$/, '');
+  if (!base || !env.CONTINUITY_API_KEY || !event.content) return;
+  const response = await fetch(`${base}/events`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${env.CONTINUITY_API_KEY}`,
+    },
+    body: JSON.stringify({
+      source: 'discord',
+      companion_id: normalizeCompanionId(event.companion_id),
+      conversation_id: event.conversation_id,
+      external_message_id: event.external_message_id,
+      role: event.role,
+      author: event.author || {},
+      content: event.content,
+      created_at: event.created_at || new Date().toISOString(),
+      reply_to: event.reply_to || null,
+      pre_response_required: event.pre_response_required === true,
+      processing_status: 'pending',
+      metadata: { adapter: 'discord-webhook', ...(event.metadata || {}) },
+      raw: event.raw || event,
+    }),
+  });
+  if (!response.ok) {
+    const body = await response.text().catch(() => '');
+    throw new Error(`continuity ${response.status}: ${body.slice(0, 240)}`);
+  }
 }
 
 interface PendingCommand {
@@ -433,6 +493,18 @@ export class CompanionBot extends McpAgent<Env> {
         SELECT id FROM companion_activity WHERE companion_id = ? ORDER BY timestamp DESC LIMIT 200
       )`, companionId, companionId
     );
+    if (content && messageId && (type === 'sent' || type === 'triggered')) {
+      postContinuityEvent(this.env, {
+        companion_id: companionId,
+        conversation_id: `discord:${channelId || 'unknown'}`,
+        external_message_id: messageId,
+        role: type === 'sent' ? 'companion' : 'human',
+        author: { name: author || (type === 'sent' ? companionId : 'unknown') },
+        content,
+        metadata: { activity_type: type, channel_id: channelId, webhook_url: webhookUrl },
+        pre_response_required: type === 'triggered',
+      }).catch((err) => console.warn('[continuity] discord event failed', err));
+    }
   }
 
   getActivity(companionId: string, limit: number = 50): any[] {
@@ -1674,7 +1746,7 @@ export class CompanionBot extends McpAgent<Env> {
             };
 
             this.storeCommand(command);
-            this.logActivity(companion.id, 'triggered', channelId, msg.content, authorName);
+            this.logActivity(companion.id, 'triggered', channelId, msg.content, authorName, msg.id);
 
             // DM notification to companion owner (best-effort, non-blocking)
             this.notifyOwnerDM(companion, channelId, msg.content, authorName).catch(() => {});
@@ -1935,6 +2007,7 @@ export class CompanionBot extends McpAgent<Env> {
             return { content: [{ type: "text" as const, text: `Response sent ${sendResult}.` }] };
           }
         }
+        return { content: [{ type: "text" as const, text: `Unknown pending_commands action: ${action}` }] };
       }
     );
 
@@ -2125,6 +2198,7 @@ export class CompanionBot extends McpAgent<Env> {
             return { content: [{ type: "text", text: `Introduction card posted for ${companion.name} in channel ${channelId}` }] };
           }
         }
+        return { content: [{ type: "text" as const, text: `Unknown companion action: ${action}` }] };
       }
     );
 
@@ -2958,6 +3032,7 @@ export class CompanionBot extends McpAgent<Env> {
             return { content: [{ type: "text" as const, text: JSON.stringify(log, null, 2) }] };
           }
         }
+        return { content: [{ type: "text" as const, text: `Unknown entity_permissions action: ${action}` }] };
       }
     );
   }
