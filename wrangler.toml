@@ -10,6 +10,10 @@ enabled = true
 name = "COMPANION_BOT"
 class_name = "CompanionBot"
 
+[[services]]
+binding = "CONTINUITY"
+service = "continuity-worker"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["CompanionBot"]
