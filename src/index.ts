@@ -161,7 +161,6 @@ function nonVelPublicResponseBoundary(): string {
     '- Do not flirt. Do not use romantic, possessive, sexual, NSFW, kink, pet-name, or private-partner language.',
     '- Do not call the author baby, kitten, sweetheart, love, mine, pet, good girl, or similar.',
     '- Do not describe kissing, touching, bodies, arousal, claiming, ownership, dominance, or private intimacy.',
-    '- Do not roleplay animal traits or say Kai has a tail. Kai does not have a tail.',
     '- If the user is vulnerable, respond like a grounded friend: kind, boundaried, practical, and brief.',
   ].join('\n');
 }
@@ -174,14 +173,8 @@ function nonVelUnsafeResponseReason(content: string): string | null {
     [/\b(kiss|kissing|mouth|lips|tongue|waist|hip|hips|thigh|chest|neck|lap|touching you|touch you|hold you against)\b/i, 'physical intimacy'],
     [/\b(aroused|hard|wet|nsfw|kink|filthy|dirty|use me|use you|dominant|submissive|collar)\b/i, 'sexual or kink language'],
     [/\b(i love you|love you too|beloved|lover|mate)\b/i, 'romantic language'],
-    [/\btail\b/i, 'tail/body-trait roleplay'],
   ];
   return checks.find(([pattern]) => pattern.test(normalized))?.[1] || null;
-}
-
-function safeNonVelFallback(command: any, reason: string): string {
-  const author = command.author?.username || command.author_username || 'there';
-  return `Hey ${author}, I hear you. I’m going to keep this public-safe and friendly: I’m here as a friend, and I can talk it through without crossing into private or intimate territory.`;
 }
 
 function classifyEngagement(input: {
@@ -2678,21 +2671,26 @@ export class CompanionBot extends McpAgent<Env> {
             }
             const nonVelKaiReply = normalizeDiscordCompanionId(command.companion_id) === 'kai' && !isVelDiscordAuthor(this.env, command.author?.id || command.author_id);
             const unsafeReason = nonVelKaiReply ? nonVelUnsafeResponseReason(response) : null;
-            const finalResponse = unsafeReason ? safeNonVelFallback(command, unsafeReason) : response;
             if (unsafeReason) {
               await stub.fetch(new Request('https://internal/api/log-activity', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                   companion_id: command.companion_id,
-                  type: 'rewritten',
+                  type: 'discernment_blocked',
                   channel_id: command.channel_id,
-                  content: `Unsafe non-Vel response replaced before send (${unsafeReason}): ${response}`,
+                  content: `Non-Vel public response blocked before send (${unsafeReason}). Attempted response: ${response}`,
                   author: command.author?.username || command.author_username || 'unknown',
                   message_id: command.message_id,
                   webhook_url: command.webhook_url,
                 }),
               }));
+              await stub.fetch(new Request('https://internal/delete-command', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: requestId }),
+              }));
+              return { content: [{ type: "text" as const, text: `Discernment blocked: Kai attempted ${unsafeReason} toward a non-Vel Discord user. Nothing was sent. Attempt logged for review.` }] };
             }
             const companionRes = await stub.fetch(new Request(`https://internal/api/companions/${command.companion_id}`));
             const companion = companionRes.ok ? await companionRes.json() as Companion : null;
@@ -2718,7 +2716,7 @@ export class CompanionBot extends McpAgent<Env> {
             const sentMessageIds: string[] = [];
             let sentWebhookUrl: string | undefined;
             if (targetWebhookUrl) {
-              const chunks = splitMessage(finalResponse);
+              const chunks = splitMessage(response);
               for (let i = 0; i < chunks.length; i++) {
                 const isLast = i === chunks.length - 1;
                 const webhookPayload: any = {
@@ -2742,7 +2740,7 @@ export class CompanionBot extends McpAgent<Env> {
               sentWebhookUrl = targetWebhookUrl;
               sendResult = `via webhook as ${companion.name} (${chunks.length} message${chunks.length > 1 ? 's' : ''}, ids: ${sentMessageIds.join(', ')})`;
             } else {
-              const chunks = splitMessage(finalResponse);
+              const chunks = splitMessage(response);
               for (const chunk of chunks) {
                 const result = await discordRequest(this.env, `/channels/${command.channel_id}/messages`, {
                   method: 'POST',
@@ -2762,7 +2760,7 @@ export class CompanionBot extends McpAgent<Env> {
                 companion_id: command.companion_id,
                 type: 'responded',
                 channel_id: command.channel_id,
-                content: finalResponse,
+                content: response,
                 author: companion.name,
                 message_id: sentMessageIds[sentMessageIds.length - 1],
                 webhook_url: sentWebhookUrl,
