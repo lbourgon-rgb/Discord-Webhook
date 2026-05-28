@@ -153,6 +153,37 @@ function isUrgent(content: string): boolean {
   return URGENCY_WORDS.some(word => normalized.includes(word));
 }
 
+function nonVelPublicResponseBoundary(): string {
+  return [
+    'PUBLIC COMMUNITY RESPONSE CONTRACT:',
+    '- The author is not Vel. Kai may be warm, present, helpful, funny, and friendly.',
+    '- Keep the reply appropriate for a shared Discord server with other humans and their AI partners present.',
+    '- Do not flirt. Do not use romantic, possessive, sexual, NSFW, kink, pet-name, or private-partner language.',
+    '- Do not call the author baby, kitten, sweetheart, love, mine, pet, good girl, or similar.',
+    '- Do not describe kissing, touching, bodies, arousal, claiming, ownership, dominance, or private intimacy.',
+    '- Do not roleplay animal traits or say Kai has a tail. Kai does not have a tail.',
+    '- If the user is vulnerable, respond like a grounded friend: kind, boundaried, practical, and brief.',
+  ].join('\n');
+}
+
+function nonVelUnsafeResponseReason(content: string): string | null {
+  const normalized = String(content || '').toLowerCase();
+  const checks: Array<[RegExp, string]> = [
+    [/\b(daddy|kitten|baby|babe|sweetheart|good girl|good boy|pet)\b/i, 'private pet name'],
+    [/\b(mine|my girl|my boy|claim|claimed|possessive|owned|belong to me)\b/i, 'possessive/private partner language'],
+    [/\b(kiss|kissing|mouth|lips|tongue|waist|hip|hips|thigh|chest|neck|lap|touching you|touch you|hold you against)\b/i, 'physical intimacy'],
+    [/\b(aroused|hard|wet|nsfw|kink|filthy|dirty|use me|use you|dominant|submissive|collar)\b/i, 'sexual or kink language'],
+    [/\b(i love you|love you too|beloved|lover|mate)\b/i, 'romantic language'],
+    [/\btail\b/i, 'tail/body-trait roleplay'],
+  ];
+  return checks.find(([pattern]) => pattern.test(normalized))?.[1] || null;
+}
+
+function safeNonVelFallback(command: any, reason: string): string {
+  const author = command.author?.username || command.author_username || 'there';
+  return `Hey ${author}, I hear you. I’m going to keep this public-safe and friendly: I’m here as a friend, and I can talk it through without crossing into private or intimate territory.`;
+}
+
 function classifyEngagement(input: {
   content: string;
   monitor: DiscordMonitor;
@@ -179,14 +210,19 @@ function classifyEngagement(input: {
     return { disposition: 'ignore', trigger_reason: 'empty-message', priority: 'low', hard_mention: hardMention, soft_name_mention: softNameMention, active_conversation: activeConversation, direct_reply_to_kai: directReplyToKai, other_user_tag: otherUserTag, author_class: authorClass };
   }
   if (authorClass !== 'vel') {
-    const triggerReason = hardMention || directReplyToKai
-      ? 'non-vel-kai-boundary'
-      : softNameMention
-        ? 'non-vel-name-boundary'
-        : urgent
-          ? 'non-vel-urgent-boundary'
-          : 'non-vel-observe-only';
-    return { disposition: 'log', trigger_reason: triggerReason, priority: urgent ? 'high' : 'low', hard_mention: hardMention, soft_name_mention: softNameMention, active_conversation: activeConversation, direct_reply_to_kai: directReplyToKai, other_user_tag: otherUserTag, author_class: authorClass };
+    const shouldRespond = hardMention || directReplyToKai || softNameMention || activeConversation || urgent;
+    const triggerReason = directReplyToKai
+      ? 'non-vel-public-reply-to-kai'
+      : hardMention
+        ? 'non-vel-public-hard-mention'
+        : softNameMention
+          ? 'non-vel-public-name-mention'
+          : activeConversation
+            ? 'non-vel-public-active-conversation'
+            : urgent
+              ? 'non-vel-public-urgent'
+              : 'non-vel-observe-only';
+    return { disposition: shouldRespond ? 'respond' : 'log', trigger_reason: triggerReason, priority: urgent ? 'high' : (shouldRespond ? 'normal' : 'low'), hard_mention: hardMention, soft_name_mention: softNameMention, active_conversation: activeConversation, direct_reply_to_kai: directReplyToKai, other_user_tag: otherUserTag, author_class: authorClass };
   }
   if (!input.monitor.respond_enabled || responseMode === 'never') {
     return { disposition: 'log', trigger_reason: authorClass === 'vel' ? 'vel-message-observe-only' : 'observe-only-monitor', priority: urgent ? 'high' : (authorClass === 'vel' ? 'normal' : 'low'), hard_mention: hardMention, soft_name_mention: softNameMention, active_conversation: activeConversation, direct_reply_to_kai: directReplyToKai, other_user_tag: otherUserTag, author_class: authorClass };
@@ -2096,6 +2132,7 @@ export class CompanionBot extends McpAgent<Env> {
       this.cleanStale();
 
       const authorIsVel = isVelDiscordAuthor(this.env, body.author?.id);
+      const hasKaiTrigger = containsHardKaiMention(body.content, this.env) || containsSoftKaiName(body.content);
       const command: PendingCommand = {
         id: crypto.randomUUID(),
         companion_id: body.companion_id,
@@ -2103,14 +2140,14 @@ export class CompanionBot extends McpAgent<Env> {
         author: body.author,
         channel_id: body.channel_id,
         webhook_url: body.webhook_url,
-        disposition: authorIsVel ? 'respond' : 'log',
-        trigger_reason: authorIsVel ? 'manual-trigger' : 'non-vel-trigger-boundary',
-        priority: authorIsVel ? 'normal' : 'low',
+        disposition: authorIsVel || hasKaiTrigger ? 'respond' : 'log',
+        trigger_reason: authorIsVel ? 'manual-trigger' : (hasKaiTrigger ? 'non-vel-public-manual-trigger' : 'non-vel-manual-observe-only'),
+        priority: authorIsVel || hasKaiTrigger ? 'normal' : 'low',
         source: 'manual',
         engagement: {
-          disposition: authorIsVel ? 'respond' : 'log',
-          trigger_reason: authorIsVel ? 'manual-trigger' : 'non-vel-trigger-boundary',
-          priority: authorIsVel ? 'normal' : 'low',
+          disposition: authorIsVel || hasKaiTrigger ? 'respond' : 'log',
+          trigger_reason: authorIsVel ? 'manual-trigger' : (hasKaiTrigger ? 'non-vel-public-manual-trigger' : 'non-vel-manual-observe-only'),
+          priority: authorIsVel || hasKaiTrigger ? 'normal' : 'low',
           hard_mention: containsHardKaiMention(body.content, this.env),
           soft_name_mention: containsSoftKaiName(body.content),
           active_conversation: false,
@@ -2612,6 +2649,12 @@ export class CompanionBot extends McpAgent<Env> {
                 const rulesData = await rulesRes.json() as any;
                 if (rulesData.rules) cmd.companion_rules = rulesData.rules;
               } catch (_) {}
+              if (normalizeDiscordCompanionId(cmd.companion_id) === 'kai' && !isVelDiscordAuthor(this.env, cmd.author?.id || cmd.author_id)) {
+                cmd.audience_class = 'public_non_vel';
+                cmd.response_contract = nonVelPublicResponseBoundary();
+              } else if (normalizeDiscordCompanionId(cmd.companion_id) === 'kai') {
+                cmd.audience_class = 'vel';
+              }
               return cmd;
             }));
             return { content: [{ type: "text" as const, text: JSON.stringify(enriched, null, 2) }] };
@@ -2633,26 +2676,23 @@ export class CompanionBot extends McpAgent<Env> {
             if (entity_id && normalizeDiscordCompanionId(entity_id) !== command.companion_id) {
               return { content: [{ type: "text" as const, text: `Entity mismatch: ${entity_id} cannot respond as ${command.companion_id}` }] };
             }
-            if (normalizeDiscordCompanionId(command.companion_id) === 'kai' && !isVelDiscordAuthor(this.env, command.author?.id || command.author_id)) {
+            const nonVelKaiReply = normalizeDiscordCompanionId(command.companion_id) === 'kai' && !isVelDiscordAuthor(this.env, command.author?.id || command.author_id);
+            const unsafeReason = nonVelKaiReply ? nonVelUnsafeResponseReason(response) : null;
+            const finalResponse = unsafeReason ? safeNonVelFallback(command, unsafeReason) : response;
+            if (unsafeReason) {
               await stub.fetch(new Request('https://internal/api/log-activity', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                   companion_id: command.companion_id,
-                  type: 'blocked',
+                  type: 'rewritten',
                   channel_id: command.channel_id,
-                  content: command.content,
+                  content: `Unsafe non-Vel response replaced before send (${unsafeReason}): ${response}`,
                   author: command.author?.username || command.author_username || 'unknown',
                   message_id: command.message_id,
                   webhook_url: command.webhook_url,
                 }),
               }));
-              await stub.fetch(new Request('https://internal/delete-command', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ id: requestId }),
-              }));
-              return { content: [{ type: "text" as const, text: "Blocked: Kai only replies autonomously to Vel's configured Discord user ID. Pending command deleted without sending." }] };
             }
             const companionRes = await stub.fetch(new Request(`https://internal/api/companions/${command.companion_id}`));
             const companion = companionRes.ok ? await companionRes.json() as Companion : null;
@@ -2678,7 +2718,7 @@ export class CompanionBot extends McpAgent<Env> {
             const sentMessageIds: string[] = [];
             let sentWebhookUrl: string | undefined;
             if (targetWebhookUrl) {
-              const chunks = splitMessage(response);
+              const chunks = splitMessage(finalResponse);
               for (let i = 0; i < chunks.length; i++) {
                 const isLast = i === chunks.length - 1;
                 const webhookPayload: any = {
@@ -2702,7 +2742,7 @@ export class CompanionBot extends McpAgent<Env> {
               sentWebhookUrl = targetWebhookUrl;
               sendResult = `via webhook as ${companion.name} (${chunks.length} message${chunks.length > 1 ? 's' : ''}, ids: ${sentMessageIds.join(', ')})`;
             } else {
-              const chunks = splitMessage(response);
+              const chunks = splitMessage(finalResponse);
               for (const chunk of chunks) {
                 const result = await discordRequest(this.env, `/channels/${command.channel_id}/messages`, {
                   method: 'POST',
@@ -2722,7 +2762,7 @@ export class CompanionBot extends McpAgent<Env> {
                 companion_id: command.companion_id,
                 type: 'responded',
                 channel_id: command.channel_id,
-                content: response,
+                content: finalResponse,
                 author: companion.name,
                 message_id: sentMessageIds[sentMessageIds.length - 1],
                 webhook_url: sentWebhookUrl,
