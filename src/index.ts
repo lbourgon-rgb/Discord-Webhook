@@ -116,6 +116,10 @@ function getVelDiscordUserIds(env: Env): string[] {
   return splitIds(env.VEL_DISCORD_USER_IDS || env.ADMIN_DISCORD_ID || '1071497830222549064');
 }
 
+function isVelDiscordAuthor(env: Env, authorId?: string): boolean {
+  return !!authorId && getVelDiscordUserIds(env).includes(authorId);
+}
+
 function normalizeMentionIds(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value
@@ -173,6 +177,16 @@ function classifyEngagement(input: {
 
   if (!content.trim()) {
     return { disposition: 'ignore', trigger_reason: 'empty-message', priority: 'low', hard_mention: hardMention, soft_name_mention: softNameMention, active_conversation: activeConversation, direct_reply_to_kai: directReplyToKai, other_user_tag: otherUserTag, author_class: authorClass };
+  }
+  if (authorClass !== 'vel') {
+    const triggerReason = hardMention || directReplyToKai
+      ? 'non-vel-kai-boundary'
+      : softNameMention
+        ? 'non-vel-name-boundary'
+        : urgent
+          ? 'non-vel-urgent-boundary'
+          : 'non-vel-observe-only';
+    return { disposition: 'log', trigger_reason: triggerReason, priority: urgent ? 'high' : 'low', hard_mention: hardMention, soft_name_mention: softNameMention, active_conversation: activeConversation, direct_reply_to_kai: directReplyToKai, other_user_tag: otherUserTag, author_class: authorClass };
   }
   if (!input.monitor.respond_enabled || responseMode === 'never') {
     return { disposition: 'log', trigger_reason: authorClass === 'vel' ? 'vel-message-observe-only' : 'observe-only-monitor', priority: urgent ? 'high' : (authorClass === 'vel' ? 'normal' : 'low'), hard_mention: hardMention, soft_name_mention: softNameMention, active_conversation: activeConversation, direct_reply_to_kai: directReplyToKai, other_user_tag: otherUserTag, author_class: authorClass };
@@ -2081,6 +2095,7 @@ export class CompanionBot extends McpAgent<Env> {
 
       this.cleanStale();
 
+      const authorIsVel = isVelDiscordAuthor(this.env, body.author?.id);
       const command: PendingCommand = {
         id: crypto.randomUUID(),
         companion_id: body.companion_id,
@@ -2088,6 +2103,21 @@ export class CompanionBot extends McpAgent<Env> {
         author: body.author,
         channel_id: body.channel_id,
         webhook_url: body.webhook_url,
+        disposition: authorIsVel ? 'respond' : 'log',
+        trigger_reason: authorIsVel ? 'manual-trigger' : 'non-vel-trigger-boundary',
+        priority: authorIsVel ? 'normal' : 'low',
+        source: 'manual',
+        engagement: {
+          disposition: authorIsVel ? 'respond' : 'log',
+          trigger_reason: authorIsVel ? 'manual-trigger' : 'non-vel-trigger-boundary',
+          priority: authorIsVel ? 'normal' : 'low',
+          hard_mention: containsHardKaiMention(body.content, this.env),
+          soft_name_mention: containsSoftKaiName(body.content),
+          active_conversation: false,
+          direct_reply_to_kai: false,
+          other_user_tag: mentionsNonKaiUser(body.content, this.env),
+          author_class: authorIsVel ? 'vel' : 'unknown',
+        },
         timestamp: Date.now(),
       };
 
@@ -2361,7 +2391,7 @@ export class CompanionBot extends McpAgent<Env> {
               referencedAuthorId,
               activeConversation: Boolean(this.getActiveConversation(channelId, msg.author?.id)),
             });
-            if (repliedCompanionId === companion.id && engagement.disposition === 'log') {
+            if (repliedCompanionId === companion.id && engagement.disposition === 'log' && engagement.author_class === 'vel') {
               engagement.disposition = 'respond';
               engagement.trigger_reason = 'direct-reply-to-kai';
               engagement.priority = engagement.priority === 'high' ? 'high' : 'normal';
@@ -2572,6 +2602,10 @@ export class CompanionBot extends McpAgent<Env> {
                 return { content: [{ type: "text" as const, text: `No pending messages for entity ${entity_id}.` }] };
               }
             }
+            pending = pending.filter((cmd: any) => String(cmd.disposition || 'respond') === 'respond');
+            if (pending.length === 0) {
+              return { content: [{ type: "text" as const, text: entity_id ? `No pending response messages for entity ${entity_id}.` : "No pending response messages." }] };
+            }
             const enriched = await Promise.all(pending.map(async (cmd: any) => {
               try {
                 const rulesRes = await stub.fetch(new Request(`https://internal/api/companions/${cmd.companion_id}/rules`));
@@ -2598,6 +2632,27 @@ export class CompanionBot extends McpAgent<Env> {
             }
             if (entity_id && normalizeDiscordCompanionId(entity_id) !== command.companion_id) {
               return { content: [{ type: "text" as const, text: `Entity mismatch: ${entity_id} cannot respond as ${command.companion_id}` }] };
+            }
+            if (normalizeDiscordCompanionId(command.companion_id) === 'kai' && !isVelDiscordAuthor(this.env, command.author?.id || command.author_id)) {
+              await stub.fetch(new Request('https://internal/api/log-activity', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  companion_id: command.companion_id,
+                  type: 'blocked',
+                  channel_id: command.channel_id,
+                  content: command.content,
+                  author: command.author?.username || command.author_username || 'unknown',
+                  message_id: command.message_id,
+                  webhook_url: command.webhook_url,
+                }),
+              }));
+              await stub.fetch(new Request('https://internal/delete-command', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: requestId }),
+              }));
+              return { content: [{ type: "text" as const, text: "Blocked: Kai only replies autonomously to Vel's configured Discord user ID. Pending command deleted without sending." }] };
             }
             const companionRes = await stub.fetch(new Request(`https://internal/api/companions/${command.companion_id}`));
             const companion = companionRes.ok ? await companionRes.json() as Companion : null;

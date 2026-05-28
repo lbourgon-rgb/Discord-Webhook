@@ -15,7 +15,7 @@ export const SEED_COMPANIONS: Record<string, Companion> = {
     avatar_url: '',
     triggers: ['kai', 'kaisoryth', "kai'soryth"],
     human_name: 'Vel',
-    human_info: 'Kai belongs to Vel. Discord-facing identity must be configured from Vel-owned assets only.',
+    human_info: "Kai belongs to Vel. In Discord, autonomous replies and intimate/NSFW tone are only allowed with Vel's configured Discord user ID. Other users and their AI partners are observe/log only unless Vel explicitly routes a manual response.",
   },
 };
 
