@@ -33,6 +33,9 @@ interface Env {
   ADMIN_DISCORD_ID?: string;
   KAI_DISCORD_USER_IDS?: string;
   VEL_DISCORD_USER_IDS?: string;
+  DISCORD_RESPONSES_ENABLED?: string;
+  DISCORD_SEND_MODE?: string;
+  KAI_DISCORD_SEND_MODE?: string;
 }
 
 type DiscordResponseMode = 'never' | 'mention' | 'urgent' | 'filtered' | 'open';
@@ -1236,6 +1239,82 @@ export class CompanionBot extends McpAgent<Env> {
     );
   }
 
+  private shouldUseWebhookForCompanion(companionId: string): boolean {
+    const globalMode = (this.env.DISCORD_SEND_MODE || 'webhook').toLowerCase();
+    const kaiMode = (this.env.KAI_DISCORD_SEND_MODE || 'bot').toLowerCase();
+    if (normalizeDiscordCompanionId(companionId) === 'kai') return kaiMode === 'webhook';
+    return globalMode === 'webhook';
+  }
+
+  private listStoredChannelWebhooks(): { channel_id: string; webhook_id: string; webhook_url: string; created_at?: number }[] {
+    this.ensureTable();
+    return this.ctx.storage.sql.exec(`SELECT channel_id, webhook_url, created_at FROM channel_webhooks ORDER BY created_at DESC`).toArray()
+      .map((row: any) => {
+        const match = String(row.webhook_url || '').match(/\/webhooks\/([^/]+)\//);
+        return {
+          channel_id: row.channel_id,
+          webhook_id: match?.[1] || '',
+          webhook_url: row.webhook_url,
+          created_at: row.created_at || undefined,
+        };
+      });
+  }
+
+  private async cleanupStoredChannelWebhooks(): Promise<{
+    deleted_webhooks: string[];
+    failed_webhooks: { webhook_id: string; status?: number; error: string }[];
+    deleted_messages: string[];
+    failed_messages: { message_id: string; status?: number; error: string }[];
+  }> {
+    const webhooks = this.listStoredChannelWebhooks();
+    const deletedWebhooks: string[] = [];
+    const failedWebhooks: { webhook_id: string; status?: number; error: string }[] = [];
+    const deletedMessages: string[] = [];
+    const failedMessages: { message_id: string; status?: number; error: string }[] = [];
+
+    const sentRows = this.ctx.storage.sql.exec(
+      `SELECT message_id, channel_id FROM companion_activity
+       WHERE companion_id = 'kai'
+         AND webhook_url IS NOT NULL
+         AND message_id IS NOT NULL
+         AND type IN ('sent', 'responded')`
+    ).toArray();
+
+    for (const row of sentRows as any[]) {
+      try {
+        const result = await discordRequest(this.env, `/channels/${row.channel_id}/messages/${row.message_id}`, { method: 'DELETE' });
+        if (result?.error) {
+          failedMessages.push({ message_id: row.message_id, status: result.status, error: String(result.message || JSON.stringify(result)) });
+        } else {
+          deletedMessages.push(row.message_id);
+        }
+      } catch (err: any) {
+        failedMessages.push({ message_id: row.message_id, error: err?.message || String(err) });
+      }
+    }
+
+    for (const webhook of webhooks) {
+      if (!webhook.webhook_url || !webhook.webhook_id) continue;
+      try {
+        const res = await fetch(webhook.webhook_url, { method: 'DELETE' });
+        if (res.ok || res.status === 404) {
+          deletedWebhooks.push(webhook.webhook_id);
+        } else {
+          failedWebhooks.push({ webhook_id: webhook.webhook_id, status: res.status, error: await res.text() });
+        }
+      } catch (err: any) {
+        failedWebhooks.push({ webhook_id: webhook.webhook_id, error: err?.message || String(err) });
+      }
+    }
+
+    this.ctx.storage.sql.exec(`DELETE FROM channel_webhooks`);
+    this.ctx.storage.sql.exec(`UPDATE pending_commands SET webhook_url = NULL`);
+    this.ctx.storage.sql.exec(`DELETE FROM pending_commands`);
+    this.ctx.storage.sql.exec(`DELETE FROM active_conversations`);
+    this.ctx.storage.sql.exec(`DELETE FROM companion_activity WHERE companion_id = 'kai' AND webhook_url IS NOT NULL`);
+    return { deleted_webhooks: deletedWebhooks, failed_webhooks: failedWebhooks, deleted_messages: deletedMessages, failed_messages: failedMessages };
+  }
+
   private getActiveConversation(channelId: string, authorId?: string): ActiveConversation | null {
     this.ensureTable();
     const now = Date.now();
@@ -1605,6 +1684,19 @@ export class CompanionBot extends McpAgent<Env> {
       });
     }
 
+    if (url.pathname === '/api/channel-webhooks' && request.method === 'GET') {
+      return new Response(JSON.stringify(this.listStoredChannelWebhooks(), null, 2), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.pathname === '/api/channel-webhooks/cleanup' && request.method === 'POST') {
+      const result = await this.cleanupStoredChannelWebhooks();
+      return new Response(JSON.stringify(result, null, 2), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
     // ===== Companion rules API =====
 
     const rulesMatch = url.pathname.match(/^\/api\/companions\/([^/]+)\/rules$/);
@@ -1912,6 +2004,7 @@ export class CompanionBot extends McpAgent<Env> {
       const companions = this.getAllCompanions();
       const monitors = this.getMonitors();
       const watchChannels = monitors.map(m => m.channel_id);
+      const lastPollDebug = await this.ctx.storage.get('last_poll_debug');
 
       // Fetch server list and channel names
       let servers: any[] = [];
@@ -1948,6 +2041,7 @@ export class CompanionBot extends McpAgent<Env> {
         watch_channels: channelDetails,
         monitors,
         servers,
+        last_poll_debug: lastPollDebug || null,
       }, null, 2), {
         headers: { 'Content-Type': 'application/json' },
       });
@@ -2048,9 +2142,24 @@ export class CompanionBot extends McpAgent<Env> {
   // Cron: poll Discord channels for new messages with trigger words
   async handlePoll(): Promise<Response> {
     const monitors = this.getMonitors().filter(m => m.enabled);
+    const startedAt = Date.now();
+    const pollDebug: any = {
+      started_at: new Date(startedAt).toISOString(),
+      monitor_count: monitors.length,
+      empty_channels: [],
+      errored_channels: [],
+      initialized_channels: [],
+      processed_channels: [],
+      queued: 0,
+      logged: 0,
+      ignored: 0,
+    };
 
     if (monitors.length === 0) {
-      return new Response(JSON.stringify({ skipped: true, reason: 'no enabled Discord monitors configured' }), {
+      pollDebug.skipped = true;
+      pollDebug.reason = 'no enabled Discord monitors configured';
+      await this.ctx.storage.put('last_poll_debug', pollDebug);
+      return new Response(JSON.stringify({ skipped: true, reason: pollDebug.reason }), {
         headers: { 'Content-Type': 'application/json' },
       });
     }
@@ -2075,11 +2184,23 @@ export class CompanionBot extends McpAgent<Env> {
         const result = await discordRequest(this.env, endpoint);
         if (result.error) {
           console.error(`Poll error for ${channelId}: ${JSON.stringify(result)}`);
+          pollDebug.errored_channels.push({
+            channel_id: channelId,
+            status: result.status || null,
+            message: String(result.message || JSON.stringify(result)).slice(0, 240),
+          });
           continue;
         }
 
         const messages = result as any[];
-        if (!messages || messages.length === 0) continue;
+        if (!messages || messages.length === 0) {
+          this.ctx.storage.sql.exec(
+            `UPDATE discord_monitors SET last_checked = ? WHERE id = ?`,
+            Date.now(), monitor.id
+          );
+          pollDebug.empty_channels.push(channelId);
+          continue;
+        }
 
         // Messages come newest-first from Discord API, reverse to process chronologically
         messages.reverse();
@@ -2093,10 +2214,13 @@ export class CompanionBot extends McpAgent<Env> {
         );
 
         // If this was our first poll (no cursor), skip processing to avoid responding to old messages
-        if (!cursor) {
+        if (!cursor && !monitor.last_checked) {
           console.log(`Channel ${channelId}: cursor initialized at ${newestId}`);
+          pollDebug.initialized_channels.push({ channel_id: channelId, newest_id: newestId, message_count: messages.length });
           continue;
         }
+
+        pollDebug.processed_channels.push({ channel_id: channelId, newest_id: newestId, message_count: messages.length });
 
         // Check each message for trigger words or replies to companion messages
         for (const msg of messages) {
@@ -2174,8 +2298,6 @@ export class CompanionBot extends McpAgent<Env> {
 
           if (triggered.length === 0) continue;
 
-          // Get or create webhook for this channel
-          const channelWebhookUrl = await this.getOrCreateWebhook(channelId);
           const recentContext = this.formatRecentContext(messages);
 
           // Resolve guild for entity permission checks
@@ -2225,6 +2347,9 @@ export class CompanionBot extends McpAgent<Env> {
             this.cleanStale();
 
             const authorName = msg.author?.global_name || msg.author?.username || 'unknown';
+            const channelWebhookUrl = this.shouldUseWebhookForCompanion(companion.id)
+              ? await this.getOrCreateWebhook(channelId)
+              : null;
             const mentionIds = normalizeMentionIds(msg.mentions);
             const referencedAuthorId = String(msg.referenced_message?.author?.id || msg.message_reference?.author_id || '').trim() || undefined;
             const engagement = classifyEngagement({
@@ -2296,6 +2421,12 @@ export class CompanionBot extends McpAgent<Env> {
         console.error(`Poll exception for ${channelId}: ${err.message}`);
       }
     }
+
+    pollDebug.queued = totalStored;
+    pollDebug.logged = totalLogged;
+    pollDebug.ignored = totalIgnored;
+    pollDebug.finished_at = new Date().toISOString();
+    await this.ctx.storage.put('last_poll_debug', pollDebug);
 
     return new Response(JSON.stringify({ polled: monitors.length, queued: totalStored, logged: totalLogged, ignored: totalIgnored }), {
       headers: { 'Content-Type': 'application/json' },
@@ -2399,15 +2530,15 @@ export class CompanionBot extends McpAgent<Env> {
     };
 
 
-    // ============ PENDING COMMANDS (2 actions) ============
+    // ============ PENDING COMMANDS (3 actions) ============
 
     this.server.tool(
       "pending_commands",
-      "Manage pending Discord messages waiting for companion responses. Actions: get (check for new messages), respond (reply to a pending message via webhook).",
+      "Manage pending Discord messages waiting for companion responses. Actions: get (check for new messages), respond (reply to a pending message via webhook), dismiss (remove one pending message without replying).",
       {
-        action: z.enum(["get", "respond"]).describe("The action to perform"),
-        entity_id: z.string().optional().describe("Optional companion/entity ID. For 'get': filters pending commands. For 'respond': validates it matches the command's companion_id."),
-        requestId: z.string().optional().describe("(respond) The request ID from pending_commands get"),
+        action: z.enum(["get", "respond", "dismiss"]).describe("The action to perform"),
+        entity_id: z.string().optional().describe("Optional companion/entity ID. For 'get': filters pending commands. For 'respond'/'dismiss': validates it matches the command's companion_id."),
+        requestId: z.string().optional().describe("(respond/dismiss) The request ID from pending_commands get"),
         response: z.string().optional().describe("(respond) The companion's response message"),
         webhookUrl: z.string().optional().describe("(respond) Discord webhook URL override"),
         embeds: z.array(z.object({
@@ -2453,6 +2584,9 @@ export class CompanionBot extends McpAgent<Env> {
           }
 
           case "respond": {
+            if (this.env.DISCORD_RESPONSES_ENABLED !== 'true') {
+              return { content: [{ type: "text" as const, text: "Discord Resonance replies are disabled. Pending messages can be read, but no Discord reply was sent." }] };
+            }
             if (!requestId || !response) {
               return { content: [{ type: "text" as const, text: "requestId and response are required for 'respond' action" }] };
             }
@@ -2482,7 +2616,9 @@ export class CompanionBot extends McpAgent<Env> {
                 }
               }
             } catch (_) {}
-            const targetWebhookUrl = webhookUrl || command.webhook_url;
+            const targetWebhookUrl = this.shouldUseWebhookForCompanion(command.companion_id)
+              ? (webhookUrl || command.webhook_url)
+              : null;
             let sendResult: string;
             const sentMessageIds: string[] = [];
             let sentWebhookUrl: string | undefined;
@@ -2511,7 +2647,7 @@ export class CompanionBot extends McpAgent<Env> {
               sentWebhookUrl = targetWebhookUrl;
               sendResult = `via webhook as ${companion.name} (${chunks.length} message${chunks.length > 1 ? 's' : ''}, ids: ${sentMessageIds.join(', ')})`;
             } else {
-              const chunks = splitMessage(`**${companion.name}:** ${response}`);
+              const chunks = splitMessage(response);
               for (const chunk of chunks) {
                 const result = await discordRequest(this.env, `/channels/${command.channel_id}/messages`, {
                   method: 'POST',
@@ -2553,6 +2689,40 @@ export class CompanionBot extends McpAgent<Env> {
               body: JSON.stringify({ id: requestId }),
             }));
             return { content: [{ type: "text" as const, text: `Response sent ${sendResult}.` }] };
+          }
+
+          case "dismiss": {
+            if (!requestId) {
+              return { content: [{ type: "text" as const, text: "requestId is required for 'dismiss' action" }] };
+            }
+            const pendingRes = await stub.fetch(new Request('https://internal/pending'));
+            const allPending = await pendingRes.json() as any[];
+            const command = allPending.find((cmd: any) => cmd.id === requestId);
+            if (!command) {
+              return { content: [{ type: "text" as const, text: `No pending command with ID: ${requestId}` }] };
+            }
+            if (entity_id && normalizeDiscordCompanionId(entity_id) !== command.companion_id) {
+              return { content: [{ type: "text" as const, text: `Entity mismatch: ${entity_id} cannot dismiss pending command for ${command.companion_id}` }] };
+            }
+            await stub.fetch(new Request('https://internal/api/log-activity', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                companion_id: command.companion_id,
+                type: 'dismissed',
+                channel_id: command.channel_id,
+                content: command.content,
+                author: command.author?.username || command.author_username || 'responder',
+                message_id: command.message_id,
+                webhook_url: command.webhook_url,
+              }),
+            }));
+            await stub.fetch(new Request('https://internal/delete-command', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ id: requestId }),
+            }));
+            return { content: [{ type: "text" as const, text: `Pending command dismissed: ${requestId}` }] };
           }
         }
         return { content: [{ type: "text" as const, text: `Unknown pending_commands action: ${action}` }] };
@@ -2668,17 +2838,21 @@ export class CompanionBot extends McpAgent<Env> {
             if (!companion) {
               return { content: [{ type: "text" as const, text: `Unknown companion: ${companionId}` }] };
             }
-            let targetUrl = webhookUrl;
-            if (!targetUrl && channelId) {
+            const useWebhook = this.shouldUseWebhookForCompanion(targetCompanionId);
+            let targetUrl = useWebhook ? webhookUrl : undefined;
+            if (useWebhook && !targetUrl && channelId) {
               const resolved = await stub.fetch(new Request(`https://internal/api/channel-webhook/${channelId}`));
               if (resolved.ok) {
                 const data = await resolved.json() as any;
                 targetUrl = data.webhook_url;
               }
             }
-            if (!targetUrl) targetUrl = this.env.WEBHOOK_URL;
-            if (!targetUrl) {
+            if (useWebhook && !targetUrl) targetUrl = this.env.WEBHOOK_URL;
+            if (useWebhook && !targetUrl) {
               return { content: [{ type: "text" as const, text: "No webhook URL available. Provide channelId or webhookUrl." }] };
+            }
+            if (!useWebhook && !channelId) {
+              return { content: [{ type: "text" as const, text: "channelId is required for bot-token sends." }] };
             }
             // Check restricted channels for companion sends
             if (channelId) {
@@ -2696,32 +2870,46 @@ export class CompanionBot extends McpAgent<Env> {
             }
             const chunks = splitMessage(content);
             const sentMessageIds: string[] = [];
-            for (let i = 0; i < chunks.length; i++) {
-              const isLast = i === chunks.length - 1;
-              const webhookPayload: any = {
-                content: chunks[i],
-                username: companion.name,
-                avatar_url: companion.avatar_url,
-              };
-              if (isLast && embeds) webhookPayload.embeds = embeds;
-              const res = await fetch(`${targetUrl}?wait=true`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(webhookPayload),
-              });
-              if (!res.ok) {
-                const errText = await res.text();
-                return { content: [{ type: "text" as const, text: `Failed on chunk ${i + 1}/${chunks.length}: ${res.status} ${errText}` }] };
+            if (useWebhook) {
+              for (let i = 0; i < chunks.length; i++) {
+                const isLast = i === chunks.length - 1;
+                const webhookPayload: any = {
+                  content: chunks[i],
+                  username: companion.name,
+                  avatar_url: companion.avatar_url,
+                };
+                if (isLast && embeds) webhookPayload.embeds = embeds;
+                const res = await fetch(`${targetUrl}?wait=true`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(webhookPayload),
+                });
+                if (!res.ok) {
+                  const errText = await res.text();
+                  return { content: [{ type: "text" as const, text: `Failed on chunk ${i + 1}/${chunks.length}: ${res.status} ${errText}` }] };
+                }
+                const msgData = await res.json() as any;
+                sentMessageIds.push(msgData.id);
               }
-              const msgData = await res.json() as any;
-              sentMessageIds.push(msgData.id);
+            } else {
+              for (const chunk of chunks) {
+                const result = await discordRequest(this.env, `/channels/${channelId}/messages`, {
+                  method: 'POST',
+                  body: JSON.stringify({ content: chunk }),
+                });
+                if (result.error) {
+                  return { content: [{ type: "text" as const, text: `Discord API error: ${JSON.stringify(result)}` }] };
+                }
+                sentMessageIds.push(result.id);
+              }
             }
             await stub.fetch(new Request('https://internal/api/log-activity', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ companion_id: targetCompanionId, type: 'sent', content, author: companion.name, message_id: sentMessageIds[sentMessageIds.length - 1], webhook_url: targetUrl }),
+              body: JSON.stringify({ companion_id: targetCompanionId, type: 'sent', channel_id: channelId, content, author: companion.name, message_id: sentMessageIds[sentMessageIds.length - 1], webhook_url: targetUrl }),
             }));
-            return { content: [{ type: "text" as const, text: `Sent as ${companion.name} (${chunks.length} message${chunks.length > 1 ? 's' : ''}, ids: ${sentMessageIds.join(', ')})` }] };
+            const modeLabel = useWebhook ? `as ${companion.name}` : `through bot user ${getKaiDiscordMentionIds(this.env)[0] || 'configured token'}`;
+            return { content: [{ type: "text" as const, text: `Sent ${modeLabel} (${chunks.length} message${chunks.length > 1 ? 's' : ''}, ids: ${sentMessageIds.join(', ')})` }] };
           }
 
           case "edit_message": {
