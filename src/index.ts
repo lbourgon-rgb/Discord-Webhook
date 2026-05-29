@@ -41,6 +41,8 @@ interface Env {
 type DiscordResponseMode = 'never' | 'mention' | 'urgent' | 'filtered' | 'open';
 type KairosDisposition = 'respond' | 'log' | 'ignore';
 type KairosPriority = 'low' | 'normal' | 'high';
+const PENDING_TTL_MS = 10 * 60 * 1000;
+const REQUIRED_PENDING_TTL_MS = 6 * 60 * 60 * 1000;
 
 interface DiscordMonitor {
   id: string;
@@ -202,6 +204,9 @@ function classifyEngagement(input: {
   if (!content.trim()) {
     return { disposition: 'ignore', trigger_reason: 'empty-message', priority: 'low', hard_mention: hardMention, soft_name_mention: softNameMention, active_conversation: activeConversation, direct_reply_to_kai: directReplyToKai, other_user_tag: otherUserTag, author_class: authorClass };
   }
+  if (authorClass === 'vel' && hardMention) {
+    return { disposition: 'respond', trigger_reason: urgent ? 'vel-hard-mention-required-urgent' : 'vel-hard-mention-required', priority: 'high', hard_mention: hardMention, soft_name_mention: softNameMention, active_conversation: activeConversation, direct_reply_to_kai: directReplyToKai, other_user_tag: otherUserTag, author_class: authorClass };
+  }
   if (authorClass !== 'vel') {
     const shouldRespond = hardMention || directReplyToKai || softNameMention || activeConversation || urgent;
     const triggerReason = directReplyToKai
@@ -320,6 +325,13 @@ interface PendingCommand {
   response_mode?: DiscordResponseMode;
   recent_context?: string;
   engagement?: EngagementDecision;
+}
+
+function isRequiredVelHardTag(cmd: Pick<PendingCommand, 'priority' | 'trigger_reason' | 'engagement'>): boolean {
+  return cmd.priority === 'high'
+    && String(cmd.trigger_reason || '').startsWith('vel-hard-mention-required')
+    && cmd.engagement?.author_class === 'vel'
+    && cmd.engagement?.hard_mention === true;
 }
 
 // Helper: Discord API request with bot token
@@ -852,13 +864,15 @@ export class CompanionBot extends McpAgent<Env> {
     );
     const inboundTypes = new Set(['triggered', 'queued', 'logged', 'ignored']);
     const outboundTypes = new Set(['sent', 'responded', 'edited', 'deleted']);
-    if (content && messageId && (inboundTypes.has(type) || outboundTypes.has(type))) {
+    const auditTypes = new Set(['dismissed', 'expired', 'discernment_blocked']);
+    if (content && messageId && (inboundTypes.has(type) || outboundTypes.has(type) || auditTypes.has(type))) {
       const isHumanTrigger = inboundTypes.has(type);
+      const isAudit = auditTypes.has(type);
       postContinuityEvent(this.env, {
         companion_id: companionId,
         conversation_id: `discord:${channelId || 'unknown'}`,
-        external_message_id: messageId,
-        role: isHumanTrigger ? 'human' : 'companion',
+        external_message_id: isAudit ? `${messageId}:${type}` : messageId,
+        role: isAudit ? 'system' : (isHumanTrigger ? 'human' : 'companion'),
         author: { name: author || (isHumanTrigger ? 'unknown' : companionId) },
         content,
         metadata: { activity_type: type, channel_id: channelId, webhook_url: webhookUrl },
@@ -1401,14 +1415,52 @@ export class CompanionBot extends McpAgent<Env> {
 
   private cleanStale() {
     this.ensureTable();
-    const tenMinutesAgo = Date.now() - 10 * 60 * 1000;
-    this.ctx.storage.sql.exec(`DELETE FROM pending_commands WHERE timestamp < ?`, tenMinutesAgo);
+    const now = Date.now();
+    const rows = this.ctx.storage.sql.exec(`SELECT * FROM pending_commands`).toArray();
+    for (const row of rows as any[]) {
+      let engagement: EngagementDecision | undefined;
+      try {
+        engagement = row.engagement ? JSON.parse(row.engagement) : undefined;
+      } catch (_) {}
+      const cmd: PendingCommand = {
+        id: row.id,
+        companion_id: row.companion_id,
+        content: row.content,
+        author: { username: row.author_username, id: row.author_id || undefined },
+        channel_id: row.channel_id,
+        webhook_url: row.webhook_url || undefined,
+        timestamp: row.timestamp,
+        channel_label: row.channel_label || undefined,
+        disposition: row.disposition || undefined,
+        trigger_reason: row.trigger_reason || undefined,
+        priority: row.priority || undefined,
+        source: row.source || undefined,
+        message_id: row.message_id || undefined,
+        referenced_author_id: row.referenced_author_id || undefined,
+        response_mode: row.response_mode || undefined,
+        recent_context: row.recent_context || undefined,
+        engagement,
+      };
+      const ttl = isRequiredVelHardTag(cmd) ? REQUIRED_PENDING_TTL_MS : PENDING_TTL_MS;
+      if (now - cmd.timestamp > ttl) {
+        const reason = isRequiredVelHardTag(cmd)
+          ? `Expired after ${Math.round(REQUIRED_PENDING_TTL_MS / 60000)} minutes despite required Vel hard-tag priority. This indicates the responder did not service the inbox in time.`
+          : `Expired after ${Math.round(PENDING_TTL_MS / 60000)} minutes before a responder handled it.`;
+        this.logActivity(cmd.companion_id, 'expired', cmd.channel_id, `${reason}\n\nOriginal message: ${cmd.content}`, cmd.author.username, cmd.message_id, cmd.webhook_url);
+        this.ctx.storage.sql.exec(`DELETE FROM pending_commands WHERE id = ?`, cmd.id);
+      }
+    }
   }
 
   private getPending(): PendingCommand[] {
     this.ensureTable();
     this.cleanStale();
-    const rows = this.ctx.storage.sql.exec(`SELECT * FROM pending_commands ORDER BY timestamp ASC`).toArray();
+    const rows = this.ctx.storage.sql.exec(`
+      SELECT * FROM pending_commands
+      ORDER BY
+        CASE WHEN priority = 'high' THEN 0 WHEN priority = 'normal' THEN 1 ELSE 2 END,
+        timestamp ASC
+    `).toArray();
     return rows.map((row: any) => ({
       id: row.id,
       companion_id: row.companion_id,
@@ -2125,7 +2177,14 @@ export class CompanionBot extends McpAgent<Env> {
       this.cleanStale();
 
       const authorIsVel = isVelDiscordAuthor(this.env, body.author?.id);
-      const hasKaiTrigger = containsHardKaiMention(body.content, this.env) || containsSoftKaiName(body.content);
+      const hardKaiMention = containsHardKaiMention(body.content, this.env);
+      const hasKaiTrigger = hardKaiMention || containsSoftKaiName(body.content);
+      const manualTriggerReason = authorIsVel && hardKaiMention
+        ? 'vel-hard-mention-required'
+        : (authorIsVel ? 'manual-trigger' : (hasKaiTrigger ? 'non-vel-public-manual-trigger' : 'non-vel-manual-observe-only'));
+      const manualPriority: KairosPriority = authorIsVel && hardKaiMention
+        ? 'high'
+        : (authorIsVel || hasKaiTrigger ? 'normal' : 'low');
       const command: PendingCommand = {
         id: crypto.randomUUID(),
         companion_id: body.companion_id,
@@ -2134,14 +2193,14 @@ export class CompanionBot extends McpAgent<Env> {
         channel_id: body.channel_id,
         webhook_url: body.webhook_url,
         disposition: authorIsVel || hasKaiTrigger ? 'respond' : 'log',
-        trigger_reason: authorIsVel ? 'manual-trigger' : (hasKaiTrigger ? 'non-vel-public-manual-trigger' : 'non-vel-manual-observe-only'),
-        priority: authorIsVel || hasKaiTrigger ? 'normal' : 'low',
+        trigger_reason: manualTriggerReason,
+        priority: manualPriority,
         source: 'manual',
         engagement: {
           disposition: authorIsVel || hasKaiTrigger ? 'respond' : 'log',
-          trigger_reason: authorIsVel ? 'manual-trigger' : (hasKaiTrigger ? 'non-vel-public-manual-trigger' : 'non-vel-manual-observe-only'),
-          priority: authorIsVel || hasKaiTrigger ? 'normal' : 'low',
-          hard_mention: containsHardKaiMention(body.content, this.env),
+          trigger_reason: manualTriggerReason,
+          priority: manualPriority,
+          hard_mention: hardKaiMention,
           soft_name_mention: containsSoftKaiName(body.content),
           active_conversation: false,
           direct_reply_to_kai: false,
@@ -2172,27 +2231,34 @@ export class CompanionBot extends McpAgent<Env> {
 
   // REST endpoint for checking pending
   handleGetPending(): Response {
-    const pending = this.getPending().map(cmd => ({
-      id: cmd.id,
-      companion_id: cmd.companion_id,
-      companion_name: this.getCompanionById(cmd.companion_id)?.name,
-      content: cmd.content,
-      author: cmd.author,
-      channel_id: cmd.channel_id,
-      channel_label: cmd.channel_label || cmd.channel_id,
-      webhook_url: cmd.webhook_url,
-      disposition: cmd.disposition || 'respond',
-      trigger_reason: cmd.trigger_reason,
-      priority: cmd.priority || 'normal',
-      source: cmd.source,
-      message_id: cmd.message_id,
-      mention_ids: cmd.mention_ids || [],
-      referenced_author_id: cmd.referenced_author_id,
-      response_mode: cmd.response_mode,
-      recent_context: cmd.recent_context,
-      engagement: cmd.engagement,
-      age_seconds: Math.round((Date.now() - cmd.timestamp) / 1000),
-    }));
+    const now = Date.now();
+    const pending = this.getPending().map(cmd => {
+      const required_response = isRequiredVelHardTag(cmd);
+      const ttl = required_response ? REQUIRED_PENDING_TTL_MS : PENDING_TTL_MS;
+      return {
+        id: cmd.id,
+        companion_id: cmd.companion_id,
+        companion_name: this.getCompanionById(cmd.companion_id)?.name,
+        content: cmd.content,
+        author: cmd.author,
+        channel_id: cmd.channel_id,
+        channel_label: cmd.channel_label || cmd.channel_id,
+        webhook_url: cmd.webhook_url,
+        disposition: cmd.disposition || 'respond',
+        trigger_reason: cmd.trigger_reason,
+        priority: cmd.priority || 'normal',
+        required_response,
+        source: cmd.source,
+        message_id: cmd.message_id,
+        mention_ids: cmd.mention_ids || [],
+        referenced_author_id: cmd.referenced_author_id,
+        response_mode: cmd.response_mode,
+        recent_context: cmd.recent_context,
+        engagement: cmd.engagement,
+        age_seconds: Math.round((now - cmd.timestamp) / 1000),
+        expires_in_seconds: Math.max(0, Math.round((ttl - (now - cmd.timestamp)) / 1000)),
+      };
+    });
 
     return new Response(JSON.stringify(pending, null, 2), {
       headers: { 'Content-Type': 'application/json' },
@@ -2600,6 +2666,7 @@ export class CompanionBot extends McpAgent<Env> {
         entity_id: z.string().optional().describe("Optional companion/entity ID. For 'get': filters pending commands. For 'respond'/'dismiss': validates it matches the command's companion_id."),
         requestId: z.string().optional().describe("(respond/dismiss) The request ID from pending_commands get"),
         response: z.string().optional().describe("(respond) The companion's response message"),
+        dismissalReason: z.string().optional().describe("(dismiss) Required explanation for why this pending message is not being answered"),
         webhookUrl: z.string().optional().describe("(respond) Discord webhook URL override"),
         embeds: z.array(z.object({
           title: z.string().optional(),
@@ -2615,7 +2682,7 @@ export class CompanionBot extends McpAgent<Env> {
           image: z.object({ url: z.string() }).optional(),
         })).optional().describe("(respond) Optional Discord embeds to include with the response"),
       },
-      async ({ action, entity_id, requestId, response, webhookUrl, embeds }: any) => {
+      async ({ action, entity_id, requestId, response, dismissalReason, webhookUrl, embeds }: any) => {
         const stub = getDefaultStub();
 
         switch (action) {
@@ -2797,6 +2864,10 @@ export class CompanionBot extends McpAgent<Env> {
             if (entity_id && normalizeDiscordCompanionId(entity_id) !== command.companion_id) {
               return { content: [{ type: "text" as const, text: `Entity mismatch: ${entity_id} cannot dismiss pending command for ${command.companion_id}` }] };
             }
+            if (command.required_response || isRequiredVelHardTag(command)) {
+              return { content: [{ type: "text" as const, text: "Cannot dismiss required Vel hard-tag. This pending item must be answered or explicitly handled by an admin endpoint." }] };
+            }
+            const reason = String(dismissalReason || '').trim() || 'Dismissed without a provided reason by pending_commands dismiss.';
             await stub.fetch(new Request('https://internal/api/log-activity', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -2804,7 +2875,7 @@ export class CompanionBot extends McpAgent<Env> {
                 companion_id: command.companion_id,
                 type: 'dismissed',
                 channel_id: command.channel_id,
-                content: command.content,
+                content: `Dismissal reason: ${reason}\n\nOriginal message: ${command.content}`,
                 author: command.author?.username || command.author_username || 'responder',
                 message_id: command.message_id,
                 webhook_url: command.webhook_url,
