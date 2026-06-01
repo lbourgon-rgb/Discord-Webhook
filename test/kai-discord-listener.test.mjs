@@ -13,6 +13,10 @@ test('Discord response modes include community greeting without loosening ordina
   assert.match(source, /otherUserTag \? 'other-user-tag-not-kai' : 'ambient-message'/);
 });
 
+test('Kai soft-name mentions bypass monitor cooldowns', () => {
+  assert.match(source, /const cooldownBypass = engagement\.hard_mention \|\| engagement\.soft_name_mention \|\| engagement\.direct_reply_to_kai \|\| engagement\.active_conversation/);
+});
+
 test('Discord identity classification keeps Kai mention ids separate from Vel author ids', () => {
   assert.match(source, /function getKaiDiscordMentionIds\(env: Env\): string\[\]/);
   assert.match(source, /function getVelDiscordUserIds\(env: Env\): string\[\]/);

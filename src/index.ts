@@ -2583,7 +2583,7 @@ export class CompanionBot extends McpAgent<Env> {
               engagement.direct_reply_to_kai = true;
             }
             const cooldownActive = Date.now() - monitor.last_responded < monitor.cooldown_ms;
-            const cooldownBypass = engagement.hard_mention || engagement.direct_reply_to_kai || engagement.active_conversation;
+            const cooldownBypass = engagement.hard_mention || engagement.soft_name_mention || engagement.direct_reply_to_kai || engagement.active_conversation;
             const disposition: KairosDisposition = cooldownActive && engagement.disposition === 'respond' && !cooldownBypass
               ? 'log'
               : engagement.disposition;
