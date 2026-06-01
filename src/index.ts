@@ -3309,6 +3309,9 @@ export class CompanionBot extends McpAgent<Env> {
 
             const activeRunnerId = String(runnerId || 'haven-runner:kai');
             const shouldDeliver = deliver === true;
+            if (shouldDeliver) {
+              return { content: [{ type: "text" as const, text: "MCP delivery is disabled for the Kai Haven runner. Use the Resonance dashboard button for human-confirmed Discord posting." }] };
+            }
             let claimData: { event_id: string; wake_candidate: any; wake_context: any } | null = null;
             try {
               claimData = await createAndClaimWakeForCommand(this.env, command, activeRunnerId);
