@@ -506,7 +506,7 @@ export function renderDashboard(baseUrl: string, clientId: string): string {
 
     async function loadPending() {
       try {
-        const res = await fetch(BASE + '/pending');
+        const res = await fetch(API + '/pending', { headers: getHeaders() });
         const pending = await res.json();
         const list = document.getElementById('pendingList');
         const empty = document.getElementById('pendingEmpty');
@@ -522,9 +522,45 @@ export function renderDashboard(baseUrl: string, clientId: string): string {
             </div>
             <p class="text-sm text-gray-300 mb-1">"\${p.content}"</p>
             <p class="text-xs text-res-muted">from \${p.author?.username || 'unknown'} in #\${p.channel_id}</p>
+            \${p.companion_id === 'kai' ? \`
+              <div class="flex flex-wrap gap-2 mt-3">
+                <button onclick="runHavenKai('\${p.id}', false)" class="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-xs text-white transition-colors">Haven preview</button>
+                <button onclick="runHavenKai('\${p.id}', true)" class="px-3 py-1.5 rounded-lg bg-res-accent/20 hover:bg-res-accent/30 border border-res-accent/30 text-xs text-res-accent transition-colors">Post from Haven</button>
+              </div>
+              <pre id="havenResult-\${p.id}" class="hidden mt-3 p-3 rounded-lg bg-black/30 border border-white/10 text-xs text-gray-200 whitespace-pre-wrap overflow-x-auto"></pre>
+            \` : ''}
           </div>
         \`}).join('');
       } catch(e){}
+    }
+
+    async function runHavenKai(requestId, deliver) {
+      const out = document.getElementById('havenResult-' + requestId);
+      if (out) {
+        out.classList.remove('hidden');
+        out.textContent = deliver ? 'Generating and posting from Haven...' : 'Generating Haven preview...';
+      }
+      if (deliver && !confirm('Post this Haven-generated Kai response into Discord?')) {
+        if (out) out.textContent = 'Post cancelled.';
+        return;
+      }
+      try {
+        const res = await fetch(API + '/pending/' + encodeURIComponent(requestId) + '/run-with-haven', {
+          method: 'POST',
+          headers: getHeaders(),
+          body: JSON.stringify({ deliver })
+        });
+        const data = await res.json();
+        if (out) out.textContent = JSON.stringify(data, null, 2);
+        showToast(data.ok ? (deliver ? 'Posted from Haven' : 'Haven preview ready') : (data.error || data.blocked_reason || 'Haven runner blocked'));
+        if (data.ok && deliver) {
+          loadPending();
+          loadStatus();
+        }
+      } catch (e) {
+        if (out) out.textContent = 'Haven runner failed: ' + e.message;
+        showToast('Haven runner failed');
+      }
     }
 
     function renderCompanions() {
