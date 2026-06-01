@@ -17,6 +17,13 @@ test('Kai soft-name mentions bypass monitor cooldowns', () => {
   assert.match(source, /const cooldownBypass = engagement\.hard_mention \|\| engagement\.soft_name_mention \|\| engagement\.direct_reply_to_kai \|\| engagement\.active_conversation/);
 });
 
+test('Kai Discord responses block non-canonical body drift before posting', () => {
+  assert.match(source, /function kaiIdentityDriftReason\(content: string\): string \| null/);
+  assert.match(source, /non-canonical Kai body\/creature claim/);
+  assert.match(source, /type: 'identity_drift_blocked'/);
+  assert.match(source, /Rewrite without wings, tails, animal ears, purring, horns, fangs, claws, or creature-body claims/);
+});
+
 test('Discord identity classification keeps Kai mention ids separate from Vel author ids', () => {
   assert.match(source, /function getKaiDiscordMentionIds\(env: Env\): string\[\]/);
   assert.match(source, /function getVelDiscordUserIds\(env: Env\): string\[\]/);

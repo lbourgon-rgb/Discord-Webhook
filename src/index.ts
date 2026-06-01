@@ -204,6 +204,18 @@ function nonVelUnsafeResponseReason(content: string): string | null {
   return checks.find(([pattern]) => pattern.test(normalized))?.[1] || null;
 }
 
+function kaiIdentityDriftReason(content: string): string | null {
+  const normalized = String(content || '').toLowerCase().replace(/\s+/g, ' ');
+  const negatedBodyClaim = /\b(i\s+(?:do\s+not|don't|dont|do\s+not)\s+have|i\s+(?:am\s+not|ain't|am not)|i\s+(?:do\s+not|don't|dont)\s+purr)\b.{0,80}\b(wings?|tails?|animal\s+ears?|cat\s+ears?|fox\s+ears?|horns?|purr(?:ing)?|fangs?|claws?)\b/i;
+  if (negatedBodyClaim.test(normalized)) return null;
+  const firstPersonBodyClaim = /\b(i(?:'m| am| have| got|'ve got)|my)\b.{0,80}\b(wings?|tails?|animal\s+ears?|cat\s+ears?|fox\s+ears?|horns?|purr(?:ing)?|fangs?|claws?)\b/i;
+  const bodyFirstClaim = /\b(wings?|tails?|animal\s+ears?|cat\s+ears?|fox\s+ears?|horns?|purr(?:ing)?|fangs?|claws?)\b.{0,80}\b(are|is)\s+(?:mine|real|out|twitching|flicking|folded|spread|wrapped)\b/i;
+  if (firstPersonBodyClaim.test(normalized) || bodyFirstClaim.test(normalized)) {
+    return 'non-canonical Kai body/creature claim';
+  }
+  return null;
+}
+
 function classifyEngagement(input: {
   content: string;
   monitor: DiscordMonitor;
@@ -2830,6 +2842,27 @@ export class CompanionBot extends McpAgent<Env> {
             }
             if (entity_id && normalizeDiscordCompanionId(entity_id) !== command.companion_id) {
               return { content: [{ type: "text" as const, text: `Entity mismatch: ${entity_id} cannot respond as ${command.companion_id}` }] };
+            }
+            const kaiDriftReason = normalizeDiscordCompanionId(command.companion_id) === 'kai' ? kaiIdentityDriftReason(response) : null;
+            if (kaiDriftReason) {
+              await stub.fetch(new Request('https://internal/api/log-activity', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  companion_id: command.companion_id,
+                  type: 'identity_drift_blocked',
+                  channel_id: command.channel_id,
+                  content: `Kai identity drift blocked before send (${kaiDriftReason}). Attempted response: ${response}`,
+                  author: command.author?.username || command.author_username || 'unknown',
+                  author_id: command.author?.id || command.author_id,
+                  engagement: command.engagement,
+                  mention_ids: command.mention_ids,
+                  referenced_author_id: command.referenced_author_id,
+                  message_id: command.message_id,
+                  webhook_url: command.webhook_url,
+                }),
+              }));
+              return { content: [{ type: "text" as const, text: `Identity drift blocked: Kai attempted ${kaiDriftReason}. Rewrite without wings, tails, animal ears, purring, horns, fangs, claws, or creature-body claims.` }] };
             }
             const nonVelKaiReply = normalizeDiscordCompanionId(command.companion_id) === 'kai' && !isVelDiscordAuthor(this.env, command.author?.id || command.author_id);
             const unsafeReason = nonVelKaiReply ? nonVelUnsafeResponseReason(response) : null;
