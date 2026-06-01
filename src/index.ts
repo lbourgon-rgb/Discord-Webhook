@@ -38,7 +38,7 @@ interface Env {
   KAI_DISCORD_SEND_MODE?: string;
 }
 
-type DiscordResponseMode = 'never' | 'mention' | 'urgent' | 'filtered' | 'open';
+type DiscordResponseMode = 'never' | 'mention' | 'urgent' | 'filtered' | 'open' | 'community_greeting';
 type KairosDisposition = 'respond' | 'log' | 'ignore';
 type KairosPriority = 'low' | 'normal' | 'high';
 const PENDING_TTL_MS = 10 * 60 * 1000;
@@ -70,6 +70,7 @@ interface EngagementDecision {
   direct_reply_to_kai: boolean;
   other_user_tag: boolean;
   author_class: 'vel' | 'unknown';
+  community_greeting: boolean;
 }
 
 interface ActiveConversation {
@@ -155,6 +156,30 @@ function isUrgent(content: string): boolean {
   return URGENCY_WORDS.some(word => normalized.includes(word));
 }
 
+function isCommunityGreeting(content: string): boolean {
+  const normalized = String(content || '').toLowerCase().replace(/[^\w\s']/g, ' ').replace(/\s+/g, ' ').trim();
+  return /^(good\s+morning|morning|gm|hello|hi|hey)\b/.test(normalized)
+    || /\b(good\s+morning|morning\s+lattice|morning\s+stone\s+grove|hello\s+lattice|hello\s+stone\s+grove)\b/.test(normalized);
+}
+
+function allowsCommunityGreeting(monitor: DiscordMonitor): boolean {
+  return monitor.respond_enabled === true
+    && (monitor.response_mode === 'open' || monitor.response_mode === 'community_greeting');
+}
+
+function engagementDebug(input: EngagementDecision): Record<string, unknown> {
+  return {
+    author_class: input.author_class,
+    hard_mention: input.hard_mention,
+    soft_name_mention: input.soft_name_mention,
+    direct_reply_to_kai: input.direct_reply_to_kai,
+    other_user_tag: input.other_user_tag,
+    active_conversation: input.active_conversation,
+    community_greeting: input.community_greeting,
+    trigger_reason: input.trigger_reason,
+  };
+}
+
 function nonVelPublicResponseBoundary(): string {
   return [
     'PUBLIC COMMUNITY RESPONSE CONTRACT:',
@@ -195,20 +220,34 @@ function classifyEngagement(input: {
   const urgent = isUrgent(content);
   const otherUserTag = mentionsNonKaiUser(content, input.env, mentionIds);
   const velIds = getVelDiscordUserIds(input.env);
-  const authorClass = input.authorId && velIds.includes(input.authorId) ? 'vel' : 'unknown';
+  const authorClass: 'vel' | 'unknown' = input.authorId && velIds.includes(input.authorId) ? 'vel' : 'unknown';
   const kaiIds = getKaiDiscordMentionIds(input.env);
   const directReplyToKai = !!input.referencedAuthorId && kaiIds.includes(input.referencedAuthorId);
   const activeConversation = input.activeConversation === true;
   const responseMode = input.monitor.response_mode || 'filtered';
+  const communityGreeting = isCommunityGreeting(content);
+  const communityGreetingAllowed = communityGreeting && allowsCommunityGreeting(input.monitor) && !otherUserTag;
+  const base: Omit<EngagementDecision, 'disposition' | 'trigger_reason' | 'priority'> = {
+    hard_mention: hardMention,
+    soft_name_mention: softNameMention,
+    active_conversation: activeConversation,
+    direct_reply_to_kai: directReplyToKai,
+    other_user_tag: otherUserTag,
+    author_class: authorClass,
+    community_greeting: communityGreeting,
+  };
 
   if (!content.trim()) {
-    return { disposition: 'ignore', trigger_reason: 'empty-message', priority: 'low', hard_mention: hardMention, soft_name_mention: softNameMention, active_conversation: activeConversation, direct_reply_to_kai: directReplyToKai, other_user_tag: otherUserTag, author_class: authorClass };
+    return { disposition: 'ignore', trigger_reason: 'empty-message', priority: 'low', ...base };
   }
   if (authorClass === 'vel' && hardMention) {
-    return { disposition: 'respond', trigger_reason: urgent ? 'vel-hard-mention-required-urgent' : 'vel-hard-mention-required', priority: 'high', hard_mention: hardMention, soft_name_mention: softNameMention, active_conversation: activeConversation, direct_reply_to_kai: directReplyToKai, other_user_tag: otherUserTag, author_class: authorClass };
+    return { disposition: 'respond', trigger_reason: urgent ? 'vel-hard-mention-required-urgent' : 'vel-hard-mention-required', priority: 'high', ...base };
+  }
+  if (!input.monitor.respond_enabled || responseMode === 'never') {
+    return { disposition: 'log', trigger_reason: authorClass === 'vel' ? 'vel-message-observe-only' : 'observe-only-monitor', priority: urgent ? 'high' : (authorClass === 'vel' ? 'normal' : 'low'), ...base };
   }
   if (authorClass !== 'vel') {
-    const shouldRespond = hardMention || directReplyToKai || softNameMention || activeConversation || urgent;
+    const shouldRespond = hardMention || directReplyToKai || softNameMention || activeConversation || urgent || communityGreetingAllowed;
     const triggerReason = directReplyToKai
       ? 'non-vel-public-reply-to-kai'
       : hardMention
@@ -217,47 +256,55 @@ function classifyEngagement(input: {
           ? 'non-vel-public-name-mention'
           : activeConversation
             ? 'non-vel-public-active-conversation'
+            : communityGreetingAllowed
+              ? 'non-vel-public-community-greeting'
             : urgent
               ? 'non-vel-public-urgent'
               : 'non-vel-observe-only';
-    return { disposition: shouldRespond ? 'respond' : 'log', trigger_reason: triggerReason, priority: urgent ? 'high' : (shouldRespond ? 'normal' : 'low'), hard_mention: hardMention, soft_name_mention: softNameMention, active_conversation: activeConversation, direct_reply_to_kai: directReplyToKai, other_user_tag: otherUserTag, author_class: authorClass };
-  }
-  if (!input.monitor.respond_enabled || responseMode === 'never') {
-    return { disposition: 'log', trigger_reason: authorClass === 'vel' ? 'vel-message-observe-only' : 'observe-only-monitor', priority: urgent ? 'high' : (authorClass === 'vel' ? 'normal' : 'low'), hard_mention: hardMention, soft_name_mention: softNameMention, active_conversation: activeConversation, direct_reply_to_kai: directReplyToKai, other_user_tag: otherUserTag, author_class: authorClass };
+    return { disposition: shouldRespond ? 'respond' : 'log', trigger_reason: triggerReason, priority: urgent ? 'high' : (shouldRespond ? 'normal' : 'low'), ...base };
   }
   if (activeConversation) {
-    return { disposition: 'respond', trigger_reason: 'active-conversation', priority: urgent ? 'high' : 'normal', hard_mention: hardMention, soft_name_mention: softNameMention, active_conversation: activeConversation, direct_reply_to_kai: directReplyToKai, other_user_tag: otherUserTag, author_class: authorClass };
+    return { disposition: 'respond', trigger_reason: 'active-conversation', priority: urgent ? 'high' : 'normal', ...base };
   }
   if (directReplyToKai) {
-    return { disposition: 'respond', trigger_reason: 'direct-reply-to-kai', priority: urgent ? 'high' : 'normal', hard_mention: hardMention, soft_name_mention: softNameMention, active_conversation: activeConversation, direct_reply_to_kai: directReplyToKai, other_user_tag: otherUserTag, author_class: authorClass };
+    return { disposition: 'respond', trigger_reason: 'direct-reply-to-kai', priority: urgent ? 'high' : 'normal', ...base };
   }
   if (responseMode === 'open') {
-    return { disposition: 'respond', trigger_reason: urgent ? 'open-monitor-urgent' : (hardMention ? 'open-monitor-hard-mention' : (softNameMention ? 'open-monitor-name-mention' : 'open-monitor')), priority: urgent ? 'high' : (hardMention || softNameMention ? 'normal' : 'low'), hard_mention: hardMention, soft_name_mention: softNameMention, active_conversation: activeConversation, direct_reply_to_kai: directReplyToKai, other_user_tag: otherUserTag, author_class: authorClass };
+    return { disposition: 'respond', trigger_reason: urgent ? 'open-monitor-urgent' : (hardMention ? 'open-monitor-hard-mention' : (softNameMention ? 'open-monitor-name-mention' : (communityGreeting ? 'open-monitor-community-greeting' : 'open-monitor'))), priority: urgent ? 'high' : (hardMention || softNameMention || communityGreeting ? 'normal' : 'low'), ...base };
+  }
+  if (responseMode === 'community_greeting') {
+    if (communityGreetingAllowed) {
+      return { disposition: 'respond', trigger_reason: 'community-greeting', priority: 'normal', ...base };
+    }
+    if (hardMention || softNameMention) {
+      return { disposition: 'respond', trigger_reason: hardMention ? 'hard-mention' : 'name-mention', priority: urgent ? 'high' : 'normal', ...base };
+    }
+    return { disposition: 'log', trigger_reason: otherUserTag ? 'other-user-tag-not-kai' : 'community-greeting-required', priority: 'low', ...base };
   }
   if (responseMode === 'mention') {
     if (hardMention || softNameMention) {
-      return { disposition: 'respond', trigger_reason: hardMention ? 'hard-mention' : 'name-mention', priority: urgent ? 'high' : 'normal', hard_mention: hardMention, soft_name_mention: softNameMention, active_conversation: activeConversation, direct_reply_to_kai: directReplyToKai, other_user_tag: otherUserTag, author_class: authorClass };
+      return { disposition: 'respond', trigger_reason: hardMention ? 'hard-mention' : 'name-mention', priority: urgent ? 'high' : 'normal', ...base };
     }
-    return { disposition: 'log', trigger_reason: otherUserTag ? 'other-user-tag-not-kai' : 'mention-required', priority: 'low', hard_mention: hardMention, soft_name_mention: softNameMention, active_conversation: activeConversation, direct_reply_to_kai: directReplyToKai, other_user_tag: otherUserTag, author_class: authorClass };
+    return { disposition: 'log', trigger_reason: otherUserTag ? 'other-user-tag-not-kai' : 'mention-required', priority: 'low', ...base };
   }
   if (responseMode === 'urgent') {
     return urgent
-      ? { disposition: 'respond', trigger_reason: 'urgency-keyword', priority: 'high', hard_mention: hardMention, soft_name_mention: softNameMention, active_conversation: activeConversation, direct_reply_to_kai: directReplyToKai, other_user_tag: otherUserTag, author_class: authorClass }
-      : { disposition: 'log', trigger_reason: 'urgency-required', priority: 'low', hard_mention: hardMention, soft_name_mention: softNameMention, active_conversation: activeConversation, direct_reply_to_kai: directReplyToKai, other_user_tag: otherUserTag, author_class: authorClass };
+      ? { disposition: 'respond', trigger_reason: 'urgency-keyword', priority: 'high', ...base }
+      : { disposition: 'log', trigger_reason: 'urgency-required', priority: 'low', ...base };
   }
   if (hardMention) {
-    return { disposition: 'respond', trigger_reason: urgent ? 'hard-mention-and-urgency' : 'hard-mention', priority: urgent ? 'high' : 'normal', hard_mention: hardMention, soft_name_mention: softNameMention, active_conversation: activeConversation, direct_reply_to_kai: directReplyToKai, other_user_tag: otherUserTag, author_class: authorClass };
+    return { disposition: 'respond', trigger_reason: urgent ? 'hard-mention-and-urgency' : 'hard-mention', priority: urgent ? 'high' : 'normal', ...base };
   }
   if (softNameMention && !otherUserTag) {
-    return { disposition: 'respond', trigger_reason: urgent ? 'name-mention-and-urgency' : 'name-mention', priority: urgent ? 'high' : 'normal', hard_mention: hardMention, soft_name_mention: softNameMention, active_conversation: activeConversation, direct_reply_to_kai: directReplyToKai, other_user_tag: otherUserTag, author_class: authorClass };
+    return { disposition: 'respond', trigger_reason: urgent ? 'name-mention-and-urgency' : 'name-mention', priority: urgent ? 'high' : 'normal', ...base };
   }
   if (urgent) {
-    return { disposition: 'respond', trigger_reason: otherUserTag ? 'urgency-with-other-user-tag' : 'urgency-keyword', priority: 'high', hard_mention: hardMention, soft_name_mention: softNameMention, active_conversation: activeConversation, direct_reply_to_kai: directReplyToKai, other_user_tag: otherUserTag, author_class: authorClass };
+    return { disposition: 'respond', trigger_reason: otherUserTag ? 'urgency-with-other-user-tag' : 'urgency-keyword', priority: 'high', ...base };
   }
   if (authorClass === 'vel') {
-    return { disposition: 'log', trigger_reason: 'vel-message', priority: 'normal', hard_mention: hardMention, soft_name_mention: softNameMention, active_conversation: activeConversation, direct_reply_to_kai: directReplyToKai, other_user_tag: otherUserTag, author_class: authorClass };
+    return { disposition: 'log', trigger_reason: 'vel-message', priority: 'normal', ...base };
   }
-  return { disposition: 'log', trigger_reason: otherUserTag ? 'other-user-tag-not-kai' : 'ambient-message', priority: 'low', hard_mention: hardMention, soft_name_mention: softNameMention, active_conversation: activeConversation, direct_reply_to_kai: directReplyToKai, other_user_tag: otherUserTag, author_class: authorClass };
+  return { disposition: 'log', trigger_reason: otherUserTag ? 'other-user-tag-not-kai' : 'ambient-message', priority: 'low', ...base };
 }
 
 async function postContinuityEvent(env: Env, event: {
@@ -311,6 +358,7 @@ interface PendingCommand {
   companion_id: string;
   content: string;
   author: { username: string; id?: string };
+  author_id?: string;
   channel_id: string;
   webhook_url?: string;
   timestamp: number;
@@ -486,6 +534,8 @@ export class CompanionBot extends McpAgent<Env> {
       channel_id TEXT,
       content TEXT,
       author TEXT,
+      author_id TEXT,
+      engagement TEXT,
       message_id TEXT,
       webhook_url TEXT,
       timestamp INTEGER NOT NULL
@@ -583,6 +633,12 @@ export class CompanionBot extends McpAgent<Env> {
     } catch (_) {}
     try {
       this.ctx.storage.sql.exec(`ALTER TABLE companion_activity ADD COLUMN webhook_url TEXT`);
+    } catch (_) {}
+    try {
+      this.ctx.storage.sql.exec(`ALTER TABLE companion_activity ADD COLUMN author_id TEXT`);
+    } catch (_) {}
+    try {
+      this.ctx.storage.sql.exec(`ALTER TABLE companion_activity ADD COLUMN engagement TEXT`);
     } catch (_) {}
     for (const stmt of [
       `ALTER TABLE pending_commands ADD COLUMN channel_label TEXT`,
@@ -850,11 +906,23 @@ export class CompanionBot extends McpAgent<Env> {
 
   // ===== Activity logging =====
 
-  logActivity(companionId: string, type: string, channelId?: string, content?: string, author?: string, messageId?: string, webhookUrl?: string) {
+  logActivity(companionId: string, type: string, channelId?: string, content?: string, author?: string, messageId?: string, webhookUrl?: string, debug?: {
+    authorId?: string;
+    engagement?: EngagementDecision;
+    mentionIds?: string[];
+    referencedAuthorId?: string;
+  }) {
     this.ensureTable();
     this.ctx.storage.sql.exec(
-      `INSERT INTO companion_activity (id, companion_id, type, channel_id, content, author, message_id, webhook_url, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      crypto.randomUUID(), companionId, type, channelId || null, content || null, author || null, messageId || null, webhookUrl || null, Date.now()
+      `INSERT INTO companion_activity (id, companion_id, type, channel_id, content, author, author_id, engagement, message_id, webhook_url, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      crypto.randomUUID(), companionId, type, channelId || null, content || null, author || null,
+      debug?.authorId || null,
+      debug?.engagement ? JSON.stringify({
+        ...engagementDebug(debug.engagement),
+        mention_ids: debug.mentionIds || [],
+        referenced_author_id: debug.referencedAuthorId || null,
+      }) : null,
+      messageId || null, webhookUrl || null, Date.now()
     );
     // Keep only last 200 entries per companion
     this.ctx.storage.sql.exec(
@@ -873,9 +941,16 @@ export class CompanionBot extends McpAgent<Env> {
         conversation_id: `discord:${channelId || 'unknown'}`,
         external_message_id: isAudit ? `${messageId}:${type}` : messageId,
         role: isAudit ? 'system' : (isHumanTrigger ? 'human' : 'companion'),
-        author: { name: author || (isHumanTrigger ? 'unknown' : companionId) },
+        author: { id: debug?.authorId || undefined, name: author || (isHumanTrigger ? 'unknown' : companionId) },
         content,
-        metadata: { activity_type: type, channel_id: channelId, webhook_url: webhookUrl },
+        metadata: {
+          activity_type: type,
+          channel_id: channelId,
+          webhook_url: webhookUrl,
+          ...(debug?.engagement ? engagementDebug(debug.engagement) : {}),
+          mention_ids: debug?.mentionIds || [],
+          referenced_author_id: debug?.referencedAuthorId || null,
+        },
         pre_response_required: type === 'triggered' || type === 'queued',
       }).catch((err) => console.warn('[continuity] discord event failed', err));
     }
@@ -893,6 +968,8 @@ export class CompanionBot extends McpAgent<Env> {
       channel_id: r.channel_id,
       content: r.content,
       author: r.author,
+      author_id: r.author_id || undefined,
+      engagement: r.engagement ? JSON.parse(r.engagement) : undefined,
       message_id: r.message_id || undefined,
       webhook_url: r.webhook_url || undefined,
       timestamp: r.timestamp,
@@ -1446,7 +1523,12 @@ export class CompanionBot extends McpAgent<Env> {
         const reason = isRequiredVelHardTag(cmd)
           ? `Expired after ${Math.round(REQUIRED_PENDING_TTL_MS / 60000)} minutes despite required Vel hard-tag priority. This indicates the responder did not service the inbox in time.`
           : `Expired after ${Math.round(PENDING_TTL_MS / 60000)} minutes before a responder handled it.`;
-        this.logActivity(cmd.companion_id, 'expired', cmd.channel_id, `${reason}\n\nOriginal message: ${cmd.content}`, cmd.author.username, cmd.message_id, cmd.webhook_url);
+        this.logActivity(cmd.companion_id, 'expired', cmd.channel_id, `${reason}\n\nOriginal message: ${cmd.content}`, cmd.author.username, cmd.message_id, cmd.webhook_url, {
+          authorId: cmd.author?.id || cmd.author_id,
+          engagement: cmd.engagement,
+          mentionIds: cmd.mention_ids,
+          referencedAuthorId: cmd.referenced_author_id,
+        });
         this.ctx.storage.sql.exec(`DELETE FROM pending_commands WHERE id = ?`, cmd.id);
       }
     }
@@ -1745,7 +1827,12 @@ export class CompanionBot extends McpAgent<Env> {
 
     if (url.pathname === '/api/log-activity' && request.method === 'POST') {
       const body = await request.json() as any;
-      this.logActivity(body.companion_id, body.type, body.channel_id, body.content, body.author, body.message_id, body.webhook_url);
+      this.logActivity(body.companion_id, body.type, body.channel_id, body.content, body.author, body.message_id, body.webhook_url, {
+        authorId: body.author_id,
+        engagement: body.engagement,
+        mentionIds: body.mention_ids,
+        referencedAuthorId: body.referenced_author_id,
+      });
       return new Response(JSON.stringify({ logged: true }), {
         headers: { 'Content-Type': 'application/json' },
       });
@@ -2178,7 +2265,8 @@ export class CompanionBot extends McpAgent<Env> {
 
       const authorIsVel = isVelDiscordAuthor(this.env, body.author?.id);
       const hardKaiMention = containsHardKaiMention(body.content, this.env);
-      const hasKaiTrigger = hardKaiMention || containsSoftKaiName(body.content);
+      const softKaiMention = containsSoftKaiName(body.content);
+      const hasKaiTrigger = hardKaiMention || softKaiMention;
       const manualTriggerReason = authorIsVel && hardKaiMention
         ? 'vel-hard-mention-required'
         : (authorIsVel ? 'manual-trigger' : (hasKaiTrigger ? 'non-vel-public-manual-trigger' : 'non-vel-manual-observe-only'));
@@ -2201,11 +2289,12 @@ export class CompanionBot extends McpAgent<Env> {
           trigger_reason: manualTriggerReason,
           priority: manualPriority,
           hard_mention: hardKaiMention,
-          soft_name_mention: containsSoftKaiName(body.content),
+          soft_name_mention: softKaiMention,
           active_conversation: false,
           direct_reply_to_kai: false,
           other_user_tag: mentionsNonKaiUser(body.content, this.env),
           author_class: authorIsVel ? 'vel' : 'unknown',
+          community_greeting: isCommunityGreeting(body.content),
         },
         timestamp: Date.now(),
       };
@@ -2526,14 +2615,20 @@ export class CompanionBot extends McpAgent<Env> {
             };
 
             this.storeCommand(command);
+            const activityDebug = {
+              authorId: msg.author?.id,
+              engagement,
+              mentionIds,
+              referencedAuthorId,
+            };
             if (disposition === 'respond') {
-              this.logActivity(companion.id, 'queued', channelId, msg.content, authorName, msg.id, channelWebhookUrl || undefined);
+              this.logActivity(companion.id, 'queued', channelId, msg.content, authorName, msg.id, channelWebhookUrl || undefined, activityDebug);
               totalStored++;
             } else if (disposition === 'log') {
-              this.logActivity(companion.id, 'logged', channelId, msg.content, authorName, msg.id, channelWebhookUrl || undefined);
+              this.logActivity(companion.id, 'logged', channelId, msg.content, authorName, msg.id, channelWebhookUrl || undefined, activityDebug);
               totalLogged++;
             } else {
-              this.logActivity(companion.id, 'ignored', channelId, msg.content, authorName, msg.id, channelWebhookUrl || undefined);
+              this.logActivity(companion.id, 'ignored', channelId, msg.content, authorName, msg.id, channelWebhookUrl || undefined, activityDebug);
               totalIgnored++;
             }
 
@@ -2748,6 +2843,10 @@ export class CompanionBot extends McpAgent<Env> {
                   channel_id: command.channel_id,
                   content: `Non-Vel public response blocked before send (${unsafeReason}). Attempted response: ${response}`,
                   author: command.author?.username || command.author_username || 'unknown',
+                  author_id: command.author?.id || command.author_id,
+                  engagement: command.engagement,
+                  mention_ids: command.mention_ids,
+                  referenced_author_id: command.referenced_author_id,
                   message_id: command.message_id,
                   webhook_url: command.webhook_url,
                 }),
@@ -2877,6 +2976,10 @@ export class CompanionBot extends McpAgent<Env> {
                 channel_id: command.channel_id,
                 content: `Dismissal reason: ${reason}\n\nOriginal message: ${command.content}`,
                 author: command.author?.username || command.author_username || 'responder',
+                author_id: command.author?.id || command.author_id,
+                engagement: command.engagement,
+                mention_ids: command.mention_ids,
+                referenced_author_id: command.referenced_author_id,
                 message_id: command.message_id,
                 webhook_url: command.webhook_url,
               }),
@@ -2906,7 +3009,7 @@ export class CompanionBot extends McpAgent<Env> {
         tier: z.enum(["fast", "normal", "slow"]).optional().describe("(add) Monitor tier"),
         enabled: z.boolean().optional().describe("(add) Whether monitor starts enabled"),
         respondEnabled: z.boolean().optional().describe("(add) Whether monitor can queue responses"),
-        responseMode: z.enum(["never", "mention", "urgent", "filtered", "open"]).optional().describe("(add) KAIROS-compatible response mode"),
+        responseMode: z.enum(["never", "mention", "urgent", "filtered", "open", "community_greeting"]).optional().describe("(add) KAIROS-compatible response mode"),
         cooldownMs: z.number().optional().describe("(add) Response cooldown in milliseconds"),
       },
       async ({ action, id, channelId, label, tier, enabled, respondEnabled, responseMode, cooldownMs }: any) => {
