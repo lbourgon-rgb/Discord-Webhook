@@ -27,6 +27,11 @@ interface Env {
   CONTINUITY_WORKER_URL?: string;
   CONTINUITY_API_KEY?: string;
   CONTINUITY?: Fetcher;
+  HAVEN?: Fetcher;
+  HAVEN_RUNNER_URL?: string;
+  HAVEN_RUNNER_API_KEY?: string;
+  KAI_HAVEN_RUNNER_ENABLED?: string;
+  KAI_HAVEN_RUNNER_DELIVERY_ENABLED?: string;
   DASHBOARD_TOKEN?: string;
   DISCORD_CLIENT_ID?: string;
   DISCORD_CLIENT_SECRET?: string;
@@ -331,9 +336,9 @@ async function postContinuityEvent(env: Env, event: {
   metadata?: Record<string, unknown>;
   raw?: unknown;
   pre_response_required?: boolean;
-}) {
+}): Promise<any | null> {
   const base = (env.CONTINUITY_WORKER_URL || '').replace(/\/+$/, '');
-  if ((!base && !env.CONTINUITY) || !env.CONTINUITY_API_KEY || !event.content) return;
+  if ((!base && !env.CONTINUITY) || !env.CONTINUITY_API_KEY || !event.content) return null;
   const init: RequestInit = {
     method: 'POST',
     headers: {
@@ -363,6 +368,124 @@ async function postContinuityEvent(env: Env, event: {
     const body = await response.text().catch(() => '');
     throw new Error(`continuity ${response.status}: ${body.slice(0, 240)}`);
   }
+  return response.json().catch(() => null);
+}
+
+async function continuityRequest(env: Env, path: string, init: RequestInit): Promise<any> {
+  const base = (env.CONTINUITY_WORKER_URL || '').replace(/\/+$/, '');
+  if ((!base && !env.CONTINUITY) || !env.CONTINUITY_API_KEY) {
+    throw new Error('Continuity binding/key is not configured');
+  }
+  const headers = {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${env.CONTINUITY_API_KEY}`,
+    ...(init.headers || {}),
+  } as Record<string, string>;
+  const response = env.CONTINUITY
+    ? await env.CONTINUITY.fetch(new Request(`https://continuity.internal${path}`, { ...init, headers }))
+    : await fetch(`${base}${path}`, { ...init, headers });
+  const text = await response.text();
+  let data: any = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { text };
+    }
+  }
+  if (!response.ok) throw new Error(`continuity ${response.status}: ${text.slice(0, 240)}`);
+  return data;
+}
+
+async function callHavenKaiRunner(env: Env, body: Record<string, unknown>): Promise<any> {
+  if (!env.HAVEN_RUNNER_API_KEY) throw new Error('HAVEN_RUNNER_API_KEY is not configured');
+  const headers = {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${env.HAVEN_RUNNER_API_KEY}`,
+  };
+  const init: RequestInit = {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+  };
+  const response = env.HAVEN
+    ? await env.HAVEN.fetch(new Request('https://haven.internal/api/runner/kai/respond', init))
+    : await fetch(env.HAVEN_RUNNER_URL || 'https://haven.lbourgon.workers.dev/api/runner/kai/respond', init);
+  const text = await response.text();
+  let data: any = text;
+  try {
+    data = JSON.parse(text);
+  } catch {}
+  if (!response.ok) throw new Error(`haven runner ${response.status}: ${text.slice(0, 400)}`);
+  return data;
+}
+
+function continuityResultEventId(result: any): string | null {
+  const first = result?.results?.[0];
+  return first?.event?.id ? String(first.event.id) : null;
+}
+
+async function createAndClaimWakeForCommand(env: Env, command: PendingCommand, runnerId: string): Promise<{ event_id: string; wake_candidate: any; wake_context: any }> {
+  const externalMessageId = command.message_id || command.id;
+  const eventResult = await postContinuityEvent(env, {
+    companion_id: command.companion_id,
+    conversation_id: `discord:${command.channel_id}`,
+    external_message_id: externalMessageId,
+    role: 'human',
+    author: {
+      id: command.author?.id || command.author_id,
+      name: command.author?.username || 'unknown',
+    },
+    content: command.content,
+    reply_to: command.referenced_author_id || null,
+    metadata: {
+      activity_type: 'runner_wake',
+      request_id: command.id,
+      channel_id: command.channel_id,
+      channel_label: command.channel_label || null,
+      trigger_reason: command.trigger_reason || null,
+      priority: command.priority || null,
+      response_mode: command.response_mode || null,
+      wake: {
+        reason: command.trigger_reason || 'discord_pending_command',
+        urgency: command.priority || 'normal',
+      },
+      ...(command.engagement ? engagementDebug(command.engagement) : {}),
+      mention_ids: command.mention_ids || [],
+      referenced_author_id: command.referenced_author_id || null,
+    },
+    raw: command,
+    pre_response_required: true,
+  });
+  const eventId = continuityResultEventId(eventResult);
+  if (!eventId) throw new Error('Continuity did not return an event id for runner wake');
+  const claim = await continuityRequest(env, '/wake-candidates/claim', {
+    method: 'POST',
+    body: JSON.stringify({
+      companion_id: normalizeCompanionId(command.companion_id),
+      event_id: eventId,
+      runner_id: runnerId,
+      lease_seconds: 300,
+    }),
+  });
+  if (!claim?.claimed || !claim?.wake_candidate?.id) {
+    throw new Error(`No wake candidate could be claimed for event ${eventId}`);
+  }
+  const wakeContext = await continuityRequest(env, `/wake-candidates/${encodeURIComponent(String(claim.wake_candidate.id))}/context`, {
+    method: 'GET',
+  });
+  return { event_id: eventId, wake_candidate: claim.wake_candidate, wake_context: wakeContext };
+}
+
+async function releaseWakeCandidate(env: Env, candidateId: string, runnerId: string, failureReason?: string): Promise<any> {
+  return continuityRequest(env, `/wake-candidates/${encodeURIComponent(candidateId)}/release`, {
+    method: 'POST',
+    body: JSON.stringify({
+      runner_id: runnerId,
+      status: failureReason ? 'skipped' : 'released',
+      failure_reason: failureReason || null,
+    }),
+  });
 }
 
 interface PendingCommand {
@@ -2763,17 +2886,21 @@ export class CompanionBot extends McpAgent<Env> {
     };
 
 
-    // ============ PENDING COMMANDS (3 actions) ============
+    // ============ PENDING COMMANDS ============
 
     this.server.tool(
       "pending_commands",
-      "Manage pending Discord messages waiting for companion responses. Actions: get (check for new messages), respond (reply to a pending message via webhook), dismiss (remove one pending message without replying).",
+      "Manage pending Discord messages waiting for companion responses. Actions: get, respond, dismiss, run_with_haven (supervised Kai runner preview/delivery).",
       {
-        action: z.enum(["get", "respond", "dismiss"]).describe("The action to perform"),
+        action: z.enum(["get", "respond", "dismiss", "run_with_haven"]).describe("The action to perform"),
         entity_id: z.string().optional().describe("Optional companion/entity ID. For 'get': filters pending commands. For 'respond'/'dismiss': validates it matches the command's companion_id."),
-        requestId: z.string().optional().describe("(respond/dismiss) The request ID from pending_commands get"),
+        requestId: z.string().optional().describe("(respond/dismiss/run_with_haven) The request ID from pending_commands get"),
         response: z.string().optional().describe("(respond) The companion's response message"),
         dismissalReason: z.string().optional().describe("(dismiss) Required explanation for why this pending message is not being answered"),
+        runnerId: z.string().optional().describe("(run_with_haven) Runner lease owner id. Defaults to haven-runner:kai"),
+        deliver: z.boolean().optional().describe("(run_with_haven) Post Haven's returned response to Discord. Requires KAI_HAVEN_RUNNER_DELIVERY_ENABLED=true."),
+        model: z.string().optional().describe("(run_with_haven) Optional Haven model override"),
+        provider: z.string().optional().describe("(run_with_haven) Optional Haven provider override"),
         webhookUrl: z.string().optional().describe("(respond) Discord webhook URL override"),
         embeds: z.array(z.object({
           title: z.string().optional(),
@@ -2789,7 +2916,7 @@ export class CompanionBot extends McpAgent<Env> {
           image: z.object({ url: z.string() }).optional(),
         })).optional().describe("(respond) Optional Discord embeds to include with the response"),
       },
-      async ({ action, entity_id, requestId, response, dismissalReason, webhookUrl, embeds }: any) => {
+      async ({ action, entity_id, requestId, response, dismissalReason, runnerId, deliver, model, provider, webhookUrl, embeds }: any) => {
         const stub = getDefaultStub();
 
         switch (action) {
@@ -2981,6 +3108,178 @@ export class CompanionBot extends McpAgent<Env> {
               body: JSON.stringify({ id: requestId }),
             }));
             return { content: [{ type: "text" as const, text: `Response sent ${sendResult}.` }] };
+          }
+
+          case "run_with_haven": {
+            if (this.env.KAI_HAVEN_RUNNER_ENABLED !== 'true') {
+              return { content: [{ type: "text" as const, text: "Haven Kai runner is installed but disabled. Set KAI_HAVEN_RUNNER_ENABLED=true when ready for supervised testing." }] };
+            }
+            if (!requestId) {
+              return { content: [{ type: "text" as const, text: "requestId is required for 'run_with_haven' action" }] };
+            }
+            const pendingRes = await stub.fetch(new Request('https://internal/pending'));
+            const allPending = await pendingRes.json() as any[];
+            const command = allPending.find((cmd: any) => cmd.id === requestId) as PendingCommand | undefined;
+            if (!command) {
+              return { content: [{ type: "text" as const, text: `No pending command with ID: ${requestId}` }] };
+            }
+            if (entity_id && normalizeDiscordCompanionId(entity_id) !== command.companion_id) {
+              return { content: [{ type: "text" as const, text: `Entity mismatch: ${entity_id} cannot run ${command.companion_id}` }] };
+            }
+            if (normalizeDiscordCompanionId(command.companion_id) !== 'kai') {
+              return { content: [{ type: "text" as const, text: "run_with_haven is Kai-only in this rollout." }] };
+            }
+
+            const activeRunnerId = String(runnerId || 'haven-runner:kai');
+            const shouldDeliver = deliver === true;
+            let claimData: { event_id: string; wake_candidate: any; wake_context: any } | null = null;
+            try {
+              claimData = await createAndClaimWakeForCommand(this.env, command, activeRunnerId);
+              const runnerResult = await callHavenKaiRunner(this.env, {
+                wake_candidate_id: claimData.wake_candidate.id,
+                runner_id: activeRunnerId,
+                request_id: command.id,
+                source: 'discord',
+                channel_id: command.channel_id,
+                channel_label: command.channel_label,
+                message_id: command.message_id,
+                author: command.author,
+                message: command.content,
+                recent_context: command.recent_context,
+                wake_context: claimData.wake_context,
+                model,
+                provider,
+                dry_run: true,
+              });
+
+              const generatedResponse = String(runnerResult.response || '').trim();
+              if (!generatedResponse) {
+                throw new Error('Haven runner returned an empty response');
+              }
+              const kaiDriftReason = kaiIdentityDriftReason(generatedResponse);
+              if (kaiDriftReason) {
+                await releaseWakeCandidate(this.env, claimData.wake_candidate.id, activeRunnerId, `identity drift blocked: ${kaiDriftReason}`).catch(() => null);
+                return { content: [{ type: "text" as const, text: `Haven runner generated identity drift (${kaiDriftReason}). Nothing was sent.\n\n${generatedResponse}` }] };
+              }
+              const nonVelKaiReply = !isVelDiscordAuthor(this.env, command.author?.id || command.author_id);
+              const unsafeReason = nonVelKaiReply ? nonVelUnsafeResponseReason(generatedResponse) : null;
+              if (unsafeReason) {
+                await releaseWakeCandidate(this.env, claimData.wake_candidate.id, activeRunnerId, `public safety blocked: ${unsafeReason}`).catch(() => null);
+                return { content: [{ type: "text" as const, text: `Haven runner generated blocked public language (${unsafeReason}). Nothing was sent.\n\n${generatedResponse}` }] };
+              }
+              if (!shouldDeliver) {
+                await releaseWakeCandidate(this.env, claimData.wake_candidate.id, activeRunnerId, 'supervised dry-run preview; no surface delivery').catch(() => null);
+                return { content: [{ type: "text" as const, text: JSON.stringify({
+                  ok: true,
+                  mode: 'dry_run_preview',
+                  requestId,
+                  continuity_event_id: claimData.event_id,
+                  wake_candidate_id: claimData.wake_candidate.id,
+                  response: generatedResponse,
+                }, null, 2) }] };
+              }
+              if (this.env.KAI_HAVEN_RUNNER_DELIVERY_ENABLED !== 'true') {
+                await releaseWakeCandidate(this.env, claimData.wake_candidate.id, activeRunnerId, 'delivery requested but disabled').catch(() => null);
+                return { content: [{ type: "text" as const, text: `Haven generated a response, but delivery is disabled. Set KAI_HAVEN_RUNNER_DELIVERY_ENABLED=true for the Kai room smoke test.\n\n${generatedResponse}` }] };
+              }
+
+              const companionRes = await stub.fetch(new Request(`https://internal/api/companions/${command.companion_id}`));
+              const companion = companionRes.ok ? await companionRes.json() as Companion : null;
+              if (!companion) throw new Error(`Unknown companion: ${command.companion_id}`);
+              const targetWebhookUrl = this.shouldUseWebhookForCompanion(command.companion_id)
+                ? (webhookUrl || command.webhook_url)
+                : null;
+              const sentMessageIds: string[] = [];
+              let sentWebhookUrl: string | undefined;
+              if (targetWebhookUrl) {
+                const chunks = splitMessage(generatedResponse);
+                for (let i = 0; i < chunks.length; i++) {
+                  const webhookPayload: any = {
+                    content: chunks[i],
+                    username: companion.name,
+                    avatar_url: companion.avatar_url,
+                  };
+                  if (i === chunks.length - 1 && embeds) webhookPayload.embeds = embeds;
+                  const res = await fetch(`${targetWebhookUrl}?wait=true`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(webhookPayload),
+                  });
+                  if (!res.ok) throw new Error(`Webhook failed on chunk ${i + 1}: ${await res.text()}`);
+                  const msgData = await res.json() as any;
+                  sentMessageIds.push(msgData.id);
+                }
+                sentWebhookUrl = targetWebhookUrl;
+              } else {
+                for (const chunk of splitMessage(generatedResponse)) {
+                  const result = await discordRequest(this.env, `/channels/${command.channel_id}/messages`, {
+                    method: 'POST',
+                    body: JSON.stringify({ content: chunk }),
+                  });
+                  if (result.error) throw new Error(`Discord API error: ${JSON.stringify(result)}`);
+                  sentMessageIds.push(result.id);
+                }
+              }
+              const continuityResponse = await continuityRequest(this.env, `/wake-candidates/${encodeURIComponent(String(claimData.wake_candidate.id))}/response`, {
+                method: 'POST',
+                body: JSON.stringify({
+                  runner_id: activeRunnerId,
+                  content: generatedResponse,
+                  external_message_id: sentMessageIds[sentMessageIds.length - 1] || `discord-runner:${requestId}`,
+                  author: { id: 'kaisoryth', name: companion.name },
+                  metadata: {
+                    runner: 'haven',
+                    delivery_status: 'delivered',
+                    surface: 'discord',
+                    request_id: requestId,
+                    channel_id: command.channel_id,
+                    sent_message_ids: sentMessageIds,
+                  },
+                }),
+              });
+              await stub.fetch(new Request('https://internal/api/log-activity', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  companion_id: command.companion_id,
+                  type: 'responded',
+                  channel_id: command.channel_id,
+                  content: generatedResponse,
+                  author: companion.name,
+                  message_id: sentMessageIds[sentMessageIds.length - 1],
+                  webhook_url: sentWebhookUrl,
+                }),
+              }));
+              await stub.fetch(new Request('https://internal/api/mark-responded', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  channel_id: command.channel_id,
+                  author_id: command.author?.id,
+                  message_id: command.message_id,
+                  started_by: 'haven-runner',
+                }),
+              }));
+              await stub.fetch(new Request('https://internal/delete-command', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: requestId }),
+              }));
+              return { content: [{ type: "text" as const, text: JSON.stringify({
+                ok: true,
+                mode: 'delivered',
+                requestId,
+                continuity_event_id: claimData.event_id,
+                wake_candidate_id: claimData.wake_candidate.id,
+                sent_message_ids: sentMessageIds,
+                continuity_response_event_id: continuityResponse?.event?.id || null,
+              }, null, 2) }] };
+            } catch (error) {
+              if (claimData?.wake_candidate?.id) {
+                await releaseWakeCandidate(this.env, claimData.wake_candidate.id, activeRunnerId, error instanceof Error ? error.message : String(error)).catch(() => null);
+              }
+              return { content: [{ type: "text" as const, text: `Haven runner failed: ${error instanceof Error ? error.message : String(error)}` }] };
+            }
           }
 
           case "dismiss": {
