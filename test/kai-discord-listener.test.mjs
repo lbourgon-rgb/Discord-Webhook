@@ -58,13 +58,16 @@ test('Kai Haven runner stays guarded behind explicit flags and wake leases', () 
   assert.match(source, /callHavenKaiRunner\(this\.env/);
   assert.match(source, /dry_run: true/);
   assert.match(source, /KAI_HAVEN_RUNNER_DELIVERY_ENABLED !== 'true'/);
+  assert.match(source, /delivery_path: 'discord-continuity-tahl-haven-serythrae-discord'/);
+  assert.match(source, /runner_origin: origin/);
+  assert.match(source, /tahl_state_present: Boolean\(claimData\.wake_context\?\.tahl_state/);
   assert.match(source, /\/wake-candidates\/\$\{encodeURIComponent\(String\(claimData\.wake_candidate\.id\)\)\}\/response/);
 });
 
 test('Kai bypasses legacy Kairos trigger path and legacy send tools', () => {
   assert.match(source, /KAI_HAVEN_RUNNER_AUTORESPOND\?: string/);
   assert.match(source, /direct-haven-hard-mention/);
-  assert.match(source, /runHavenRunnerFromDashboard\(command\.id, true\)/);
+  assert.match(source, /runHavenRunnerFromDashboard\(command\.id, true, 'autorespond'\)/);
   assert.match(source, /Cron: skipped legacy Kai path/);
   assert.match(source, /Legacy pending_commands respond is disabled for Kai/);
   assert.match(source, /Legacy companion send is disabled for Kai/);

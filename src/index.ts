@@ -1745,7 +1745,7 @@ export class CompanionBot extends McpAgent<Env> {
     this.ctx.storage.sql.exec(`DELETE FROM pending_commands WHERE id = ?`, id);
   }
 
-  private async runHavenRunnerFromDashboard(requestId: string, deliver: boolean): Promise<Response> {
+  private async runHavenRunnerFromDashboard(requestId: string, deliver: boolean, origin: 'dashboard' | 'autorespond' = 'dashboard'): Promise<Response> {
     this.ensureTable();
     if (this.env.KAI_HAVEN_RUNNER_ENABLED !== 'true') {
       return new Response(JSON.stringify({
@@ -1767,7 +1767,7 @@ export class CompanionBot extends McpAgent<Env> {
       });
     }
 
-    const runnerId = 'haven-runner:kai-dashboard';
+    const runnerId = `haven-runner:kai-${origin}`;
     let claimData: { event_id: string; wake_candidate: any; wake_context: any } | null = null;
     try {
       claimData = await createAndClaimWakeForCommand(this.env, command, runnerId);
@@ -1868,11 +1868,14 @@ export class CompanionBot extends McpAgent<Env> {
           author: { id: 'kaisoryth', name: companion.name },
           metadata: {
             runner: 'haven',
+            runner_origin: origin,
+            delivery_path: 'discord-continuity-tahl-haven-serythrae-discord',
             delivery_status: 'delivered',
             surface: 'discord',
             request_id: requestId,
             channel_id: command.channel_id,
             sent_message_ids: sentMessageIds,
+            tahl_state_present: Boolean(claimData.wake_context?.tahl_state && Object.keys(claimData.wake_context.tahl_state).length),
           },
         }),
       });
@@ -1885,6 +1888,7 @@ export class CompanionBot extends McpAgent<Env> {
         request_id: requestId,
         continuity_event_id: claimData.event_id,
         wake_candidate_id: claimData.wake_candidate.id,
+        runner_origin: origin,
         sent_message_ids: sentMessageIds,
         continuity_response_event_id: continuityResponse?.event?.id || null,
         response: generatedResponse,
@@ -2813,7 +2817,7 @@ export class CompanionBot extends McpAgent<Env> {
               this.logActivity(companion.id, 'queued', channelId, msg.content, authorName, msg.id, undefined, activityDebug);
               totalStored++;
               try {
-                const runnerResponse = await this.runHavenRunnerFromDashboard(command.id, true);
+                const runnerResponse = await this.runHavenRunnerFromDashboard(command.id, true, 'autorespond');
                 if (!runnerResponse.ok) {
                   const errorText = await runnerResponse.text().catch(() => '');
                   this.logActivity(companion.id, 'runner_failed', channelId, errorText || `Haven runner returned ${runnerResponse.status}`, authorName, msg.id, undefined, activityDebug);
