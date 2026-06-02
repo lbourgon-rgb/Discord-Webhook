@@ -60,3 +60,12 @@ test('Kai Haven runner stays guarded behind explicit flags and wake leases', () 
   assert.match(source, /KAI_HAVEN_RUNNER_DELIVERY_ENABLED !== 'true'/);
   assert.match(source, /\/wake-candidates\/\$\{encodeURIComponent\(String\(claimData\.wake_candidate\.id\)\)\}\/response/);
 });
+
+test('Kai bypasses legacy Kairos trigger path and legacy send tools', () => {
+  assert.match(source, /KAI_HAVEN_RUNNER_AUTORESPOND\?: string/);
+  assert.match(source, /direct-haven-hard-mention/);
+  assert.match(source, /runHavenRunnerFromDashboard\(command\.id, true\)/);
+  assert.match(source, /Cron: skipped legacy Kai path/);
+  assert.match(source, /Legacy pending_commands respond is disabled for Kai/);
+  assert.match(source, /Legacy companion send is disabled for Kai/);
+});

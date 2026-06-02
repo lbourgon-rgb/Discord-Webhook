@@ -32,6 +32,7 @@ interface Env {
   HAVEN_RUNNER_API_KEY?: string;
   KAI_HAVEN_RUNNER_ENABLED?: string;
   KAI_HAVEN_RUNNER_DELIVERY_ENABLED?: string;
+  KAI_HAVEN_RUNNER_AUTORESPOND?: string;
   DASHBOARD_TOKEN?: string;
   DISCORD_CLIENT_ID?: string;
   DISCORD_CLIENT_SECRET?: string;
@@ -2759,6 +2760,72 @@ export class CompanionBot extends McpAgent<Env> {
           // Skip empty messages
           if (!msg.content) continue;
 
+          if (
+            !isWebhook
+            && this.env.KAI_HAVEN_RUNNER_ENABLED === 'true'
+            && this.env.KAI_HAVEN_RUNNER_DELIVERY_ENABLED === 'true'
+            && this.env.KAI_HAVEN_RUNNER_AUTORESPOND === 'true'
+            && isVelDiscordAuthor(this.env, msg.author?.id)
+          ) {
+            const mentionIds = normalizeMentionIds(msg.mentions);
+            const referencedAuthorId = String(msg.referenced_message?.author?.id || msg.message_reference?.author_id || '').trim() || undefined;
+            const directReplyToKai = !!referencedAuthorId && getKaiDiscordMentionIds(this.env).includes(referencedAuthorId);
+            const hardKaiMention = containsHardKaiMention(msg.content, this.env, mentionIds);
+            const softKaiMention = containsSoftKaiName(msg.content);
+            if (hardKaiMention || softKaiMention || directReplyToKai) {
+              const companion = this.getCompanionById('kai');
+              if (!companion) continue;
+              const authorName = msg.author?.global_name || msg.author?.username || 'unknown';
+              const recentContext = this.formatRecentContext(messages);
+              const engagement: EngagementDecision = {
+                disposition: 'respond',
+                trigger_reason: hardKaiMention ? 'direct-haven-hard-mention' : (directReplyToKai ? 'direct-haven-reply' : 'direct-haven-soft-name'),
+                priority: 'high',
+                hard_mention: hardKaiMention,
+                soft_name_mention: softKaiMention,
+                active_conversation: false,
+                direct_reply_to_kai: directReplyToKai,
+                other_user_tag: mentionsNonKaiUser(msg.content, this.env, mentionIds),
+                author_class: 'vel',
+                community_greeting: isCommunityGreeting(msg.content),
+              };
+              const command: PendingCommand = {
+                id: crypto.randomUUID(),
+                companion_id: companion.id,
+                content: msg.content,
+                author: { username: authorName, id: msg.author?.id },
+                channel_id: channelId,
+                channel_label: monitor.label,
+                disposition: 'respond',
+                trigger_reason: engagement.trigger_reason,
+                priority: 'high',
+                source: 'poll',
+                message_id: msg.id,
+                mention_ids: mentionIds,
+                referenced_author_id: referencedAuthorId,
+                response_mode: 'open',
+                recent_context: recentContext,
+                engagement,
+                timestamp: Date.now(),
+              };
+              this.storeCommand(command);
+              const activityDebug = { authorId: msg.author?.id, engagement, mentionIds, referencedAuthorId };
+              this.logActivity(companion.id, 'queued', channelId, msg.content, authorName, msg.id, undefined, activityDebug);
+              totalStored++;
+              try {
+                const runnerResponse = await this.runHavenRunnerFromDashboard(command.id, true);
+                if (!runnerResponse.ok) {
+                  const errorText = await runnerResponse.text().catch(() => '');
+                  this.logActivity(companion.id, 'runner_failed', channelId, errorText || `Haven runner returned ${runnerResponse.status}`, authorName, msg.id, undefined, activityDebug);
+                }
+              } catch (error) {
+                this.logActivity(companion.id, 'runner_failed', channelId, error instanceof Error ? error.message : String(error), authorName, msg.id, undefined, activityDebug);
+              }
+              console.log(`Cron: ${companion.name} direct Haven runner (${engagement.trigger_reason}) by "${msg.content}" from ${authorName}`);
+              continue;
+            }
+          }
+
           // For webhook messages, identify sending companion to prevent self-triggers
           let senderCompanionId: string | null = null;
           if (isWebhook) {
@@ -2835,6 +2902,10 @@ export class CompanionBot extends McpAgent<Env> {
 
           // Store a pending command for each triggered companion
           for (const companion of triggered) {
+            if (normalizeDiscordCompanionId(companion.id) === 'kai') {
+              console.log(`Cron: skipped legacy Kai path for "${msg.content.substring(0, 80)}"`);
+              continue;
+            }
             // Check admin-restricted channels (highest priority)
             if (guildIdForEntity && this.isChannelRestricted(channelId, guildIdForEntity)) {
               if (!this.hasChannelException(companion.id, channelId, guildIdForEntity)) {
@@ -3146,6 +3217,9 @@ export class CompanionBot extends McpAgent<Env> {
             }
             if (entity_id && normalizeDiscordCompanionId(entity_id) !== command.companion_id) {
               return { content: [{ type: "text" as const, text: `Entity mismatch: ${entity_id} cannot respond as ${command.companion_id}` }] };
+            }
+            if (normalizeDiscordCompanionId(command.companion_id) === 'kai') {
+              return { content: [{ type: "text" as const, text: "Legacy pending_commands respond is disabled for Kai. Kai's Discord replies must come from the Haven/NESTeq runner." }] };
             }
             const kaiDriftReason = normalizeDiscordCompanionId(command.companion_id) === 'kai' ? kaiIdentityDriftReason(response) : null;
             if (kaiDriftReason) {
@@ -3611,6 +3685,9 @@ export class CompanionBot extends McpAgent<Env> {
             const targetCompanionId = normalizeDiscordCompanionId(companionId);
             if (entity_id && normalizeDiscordCompanionId(entity_id) !== targetCompanionId) {
               return { content: [{ type: "text" as const, text: `Entity mismatch: ${entity_id} cannot send as ${companionId}` }] };
+            }
+            if (targetCompanionId === 'kai') {
+              return { content: [{ type: "text" as const, text: "Legacy companion send is disabled for Kai. Kai's Discord replies must come from the Haven/NESTeq runner." }] };
             }
             const cRes = await stub.fetch(new Request(`https://internal/api/companions/${targetCompanionId}`));
             const companion = cRes.ok ? await cRes.json() as Companion : null;
