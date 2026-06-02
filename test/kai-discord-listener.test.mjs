@@ -55,6 +55,8 @@ test('Kai Haven runner stays guarded behind explicit flags and wake leases', () 
   assert.match(source, /KAI_HAVEN_RUNNER_DELIVERY_ENABLED\?: string/);
   assert.match(source, /action: z\.enum\(\["get", "respond", "dismiss", "run_with_haven"\]\)/);
   assert.match(source, /createAndClaimWakeForCommand\(this\.env, command, activeRunnerId\)/);
+  assert.match(source, /findContinuityEventForCommand\(env, command\)/);
+  assert.match(source, /UNIQUE constraint failed/);
   assert.match(source, /callHavenKaiRunner\(this\.env/);
   assert.match(source, /dry_run: true/);
   assert.match(source, /KAI_HAVEN_RUNNER_DELIVERY_ENABLED !== 'true'/);

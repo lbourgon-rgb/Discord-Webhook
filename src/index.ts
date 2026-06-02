@@ -426,39 +426,70 @@ function continuityResultEventId(result: any): string | null {
   return first?.event?.id ? String(first.event.id) : null;
 }
 
+async function findContinuityEventForCommand(env: Env, command: PendingCommand): Promise<any | null> {
+  const externalMessageId = command.message_id || command.id;
+  const params = new URLSearchParams({
+    source: 'discord',
+    companion_id: normalizeCompanionId(command.companion_id),
+    conversation_id: `discord:${command.channel_id}`,
+    limit: '200',
+  });
+  try {
+    const data = await continuityRequest(env, `/events?${params.toString()}`, { method: 'GET' });
+    const events = Array.isArray(data?.events) ? data.events : [];
+    return events.find((event: any) =>
+      String(event.external_message_id || '') === externalMessageId
+      && String(event.role || '') === 'human'
+    ) || null;
+  } catch {
+    return null;
+  }
+}
+
 async function createAndClaimWakeForCommand(env: Env, command: PendingCommand, runnerId: string): Promise<{ event_id: string; wake_candidate: any; wake_context: any }> {
   const externalMessageId = command.message_id || command.id;
-  const eventResult = await postContinuityEvent(env, {
-    companion_id: command.companion_id,
-    conversation_id: `discord:${command.channel_id}`,
-    external_message_id: externalMessageId,
-    role: 'human',
-    author: {
-      id: command.author?.id || command.author_id,
-      name: command.author?.username || 'unknown',
-    },
-    content: command.content,
-    reply_to: command.referenced_author_id || null,
-    metadata: {
-      activity_type: 'runner_wake',
-      request_id: command.id,
-      channel_id: command.channel_id,
-      channel_label: command.channel_label || null,
-      trigger_reason: command.trigger_reason || null,
-      priority: command.priority || null,
-      response_mode: command.response_mode || null,
-      wake: {
-        reason: command.trigger_reason || 'discord_pending_command',
-        urgency: command.priority || 'normal',
-      },
-      ...(command.engagement ? engagementDebug(command.engagement) : {}),
-      mention_ids: command.mention_ids || [],
-      referenced_author_id: command.referenced_author_id || null,
-    },
-    raw: command,
-    pre_response_required: true,
-  });
-  const eventId = continuityResultEventId(eventResult);
+  const existingEvent = await findContinuityEventForCommand(env, command);
+  let eventId = existingEvent?.id ? String(existingEvent.id) : null;
+  if (!eventId) {
+    try {
+      const eventResult = await postContinuityEvent(env, {
+        companion_id: command.companion_id,
+        conversation_id: `discord:${command.channel_id}`,
+        external_message_id: externalMessageId,
+        role: 'human',
+        author: {
+          id: command.author?.id || command.author_id,
+          name: command.author?.username || 'unknown',
+        },
+        content: command.content,
+        reply_to: command.referenced_author_id || null,
+        metadata: {
+          activity_type: 'runner_wake',
+          request_id: command.id,
+          channel_id: command.channel_id,
+          channel_label: command.channel_label || null,
+          trigger_reason: command.trigger_reason || null,
+          priority: command.priority || null,
+          response_mode: command.response_mode || null,
+          wake: {
+            reason: command.trigger_reason || 'discord_pending_command',
+            urgency: command.priority || 'normal',
+          },
+          ...(command.engagement ? engagementDebug(command.engagement) : {}),
+          mention_ids: command.mention_ids || [],
+          referenced_author_id: command.referenced_author_id || null,
+        },
+        raw: command,
+        pre_response_required: true,
+      });
+      eventId = continuityResultEventId(eventResult);
+    } catch (error) {
+      if (!String(error instanceof Error ? error.message : error).includes('UNIQUE constraint failed')) throw error;
+      const replayedEvent = await findContinuityEventForCommand(env, command);
+      eventId = replayedEvent?.id ? String(replayedEvent.id) : null;
+      if (!eventId) throw error;
+    }
+  }
   if (!eventId) throw new Error('Continuity did not return an event id for runner wake');
   const claim = await continuityRequest(env, '/wake-candidates/claim', {
     method: 'POST',
