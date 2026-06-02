@@ -1078,6 +1078,7 @@ export class CompanionBot extends McpAgent<Env> {
     engagement?: EngagementDecision;
     mentionIds?: string[];
     referencedAuthorId?: string;
+    skipContinuity?: boolean;
   }) {
     this.ensureTable();
     this.ctx.storage.sql.exec(
@@ -1100,7 +1101,7 @@ export class CompanionBot extends McpAgent<Env> {
     const inboundTypes = new Set(['triggered', 'queued', 'logged', 'ignored']);
     const outboundTypes = new Set(['sent', 'responded', 'edited', 'deleted']);
     const auditTypes = new Set(['dismissed', 'expired', 'discernment_blocked']);
-    if (content && messageId && (inboundTypes.has(type) || outboundTypes.has(type) || auditTypes.has(type))) {
+    if (!debug?.skipContinuity && content && messageId && (inboundTypes.has(type) || outboundTypes.has(type) || auditTypes.has(type))) {
       const isHumanTrigger = inboundTypes.has(type);
       const isAudit = auditTypes.has(type);
       postContinuityEvent(this.env, {
@@ -2844,7 +2845,7 @@ export class CompanionBot extends McpAgent<Env> {
                 timestamp: Date.now(),
               };
               this.storeCommand(command);
-              const activityDebug = { authorId: msg.author?.id, engagement, mentionIds, referencedAuthorId };
+              const activityDebug = { authorId: msg.author?.id, engagement, mentionIds, referencedAuthorId, skipContinuity: true };
               this.logActivity(companion.id, 'queued', channelId, msg.content, authorName, msg.id, undefined, activityDebug);
               totalStored++;
               try {

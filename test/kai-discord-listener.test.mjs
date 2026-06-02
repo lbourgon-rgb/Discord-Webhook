@@ -63,6 +63,7 @@ test('Kai Haven runner stays guarded behind explicit flags and wake leases', () 
   assert.match(source, /delivery_path: 'discord-continuity-tahl-haven-serythrae-discord'/);
   assert.match(source, /runner_origin: origin/);
   assert.match(source, /tahl_state_present: Boolean\(claimData\.wake_context\?\.tahl_state/);
+  assert.match(source, /skipContinuity: true/);
   assert.match(source, /\/wake-candidates\/\$\{encodeURIComponent\(String\(claimData\.wake_candidate\.id\)\)\}\/response/);
 });
 
