@@ -462,6 +462,7 @@ async function createAndClaimWakeForCommand(env: Env, command: PendingCommand, r
           name: command.author?.username || 'unknown',
         },
         content: command.content,
+        created_at: command.timestamp ? new Date(command.timestamp).toISOString() : undefined,
         reply_to: command.referenced_author_id || null,
         metadata: {
           activity_type: 'runner_wake',
@@ -1078,6 +1079,7 @@ export class CompanionBot extends McpAgent<Env> {
     engagement?: EngagementDecision;
     mentionIds?: string[];
     referencedAuthorId?: string;
+    createdAt?: string;
     skipContinuity?: boolean;
   }) {
     this.ensureTable();
@@ -1111,6 +1113,7 @@ export class CompanionBot extends McpAgent<Env> {
         role: isAudit ? 'system' : (isHumanTrigger ? 'human' : 'companion'),
         author: { id: debug?.authorId || undefined, name: author || (isHumanTrigger ? 'unknown' : companionId) },
         content,
+        created_at: debug?.createdAt,
         metadata: {
           activity_type: type,
           channel_id: channelId,
@@ -2842,10 +2845,10 @@ export class CompanionBot extends McpAgent<Env> {
                 response_mode: 'open',
                 recent_context: recentContext,
                 engagement,
-                timestamp: Date.now(),
+                timestamp: Date.parse(msg.timestamp) || Date.now(),
               };
               this.storeCommand(command);
-              const activityDebug = { authorId: msg.author?.id, engagement, mentionIds, referencedAuthorId, skipContinuity: true };
+              const activityDebug = { authorId: msg.author?.id, engagement, mentionIds, referencedAuthorId, createdAt: msg.timestamp };
               this.logActivity(companion.id, 'queued', channelId, msg.content, authorName, msg.id, undefined, activityDebug);
               totalStored++;
               try {
@@ -3030,7 +3033,7 @@ export class CompanionBot extends McpAgent<Env> {
               response_mode: monitor.response_mode,
               recent_context: recentContext,
               engagement,
-              timestamp: Date.now(),
+              timestamp: Date.parse(msg.timestamp) || Date.now(),
             };
 
             this.storeCommand(command);
@@ -3039,6 +3042,7 @@ export class CompanionBot extends McpAgent<Env> {
               engagement,
               mentionIds,
               referencedAuthorId,
+              createdAt: msg.timestamp,
             };
             if (disposition === 'respond') {
               this.logActivity(companion.id, 'queued', channelId, msg.content, authorName, msg.id, channelWebhookUrl || undefined, activityDebug);

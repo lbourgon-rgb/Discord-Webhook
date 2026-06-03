@@ -36,6 +36,7 @@ test('Discord identity classification keeps Kai mention ids separate from Vel au
 test('Discord Continuity logging preserves author id and engagement debug metadata', () => {
   assert.match(source, /author: \{ id: debug\?\.authorId \|\| undefined, name:/);
   assert.match(source, /author_id, engagement, message_id, webhook_url/);
+  assert.match(source, /created_at: debug\?\.createdAt/);
   assert.match(source, /mention_ids: debug\?\.mentionIds \|\| \[\]/);
   assert.match(source, /referenced_author_id: debug\?\.referencedAuthorId \|\| null/);
   assert.match(source, /activity_type: type/);
@@ -63,7 +64,8 @@ test('Kai Haven runner stays guarded behind explicit flags and wake leases', () 
   assert.match(source, /delivery_path: 'discord-continuity-tahl-haven-serythrae-discord'/);
   assert.match(source, /runner_origin: origin/);
   assert.match(source, /tahl_state_present: Boolean\(claimData\.wake_context\?\.tahl_state/);
-  assert.match(source, /skipContinuity: true/);
+  assert.doesNotMatch(source, /skipContinuity: true/);
+  assert.match(source, /timestamp: Date\.parse\(msg\.timestamp\) \|\| Date\.now\(\)/);
   assert.match(source, /\/wake-candidates\/\$\{encodeURIComponent\(String\(claimData\.wake_candidate\.id\)\)\}\/response/);
 });
 
