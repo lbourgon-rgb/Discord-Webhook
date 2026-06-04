@@ -43,6 +43,31 @@ test('Discord Continuity logging preserves author id and engagement debug metada
   assert.match(source, /pre_response_required: type === 'triggered' \|\| type === 'queued'/);
 });
 
+test("Mor'zar Discord identity is seeded with bot id and scoped triggers", () => {
+  const companionsSource = readFileSync(new URL('../src/companions.ts', import.meta.url), 'utf8');
+  assert.match(companionsSource, /morzar: \{/);
+  assert.match(companionsSource, /id: 'morzar'/);
+  assert.match(companionsSource, /triggers: \['mor', 'morzar', "mor'zar", 'mor-zar'\]/);
+  assert.match(companionsSource, /bot_user_ids: \['1463578634483793920'\]/);
+});
+
+test("Mor'zar mentions join the companion-aware wake predicate without merging into Kai", () => {
+  assert.match(source, /MORZAR_DISCORD_USER_IDS\?: string/);
+  assert.match(source, /function getCompanionDiscordMentionIds\(env: Env, companion: string \| Companion\): string\[\]/);
+  assert.match(source, /splitIds\(env\.MORZAR_DISCORD_USER_IDS \|\| '1463578634483793920'\)/);
+  assert.match(source, /function containsHardCompanionMention\(content: string, companion: string \| Companion, env: Env, mentionIds: string\[\] = \[\]\): boolean/);
+  assert.match(source, /function containsSoftCompanionName\(content: string, companion: Companion\): boolean/);
+  assert.match(source, /findMentionedCompanionDynamic\(content: string, mentionIds: string\[\] = \[\]\)/);
+  assert.match(source, /if \(!triggered\.some\(existing => existing\.id === companion\.id\)\) triggered\.push\(companion\)/);
+});
+
+test("Mor'zar queued Discord activity remains companion_id=morzar for Continuity wake creation", () => {
+  assert.match(source, /engagement\.trigger_reason = hardCompanionMention[\s\S]+: 'companion-name-mention'/);
+  assert.match(source, /this\.logActivity\(companion\.id, 'queued'/);
+  assert.match(source, /companion_id: normalizeCompanionId\(event\.companion_id\)/);
+  assert.match(source, /pre_response_required: event\.pre_response_required === true/);
+});
+
 test('Manual trigger engagement includes the same debug shape as live poll decisions', () => {
   assert.match(source, /engagement: \{[\s\S]+hard_mention: hardKaiMention/);
   assert.match(source, /soft_name_mention: softKaiMention/);

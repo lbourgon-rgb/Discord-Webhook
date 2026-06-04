@@ -42,6 +42,7 @@ interface Env {
   DISCORD_RESPONSES_ENABLED?: string;
   DISCORD_SEND_MODE?: string;
   KAI_DISCORD_SEND_MODE?: string;
+  MORZAR_DISCORD_USER_IDS?: string;
 }
 
 type DiscordResponseMode = 'never' | 'mention' | 'urgent' | 'filtered' | 'open' | 'community_greeting';
@@ -105,6 +106,7 @@ function normalizeCompanionId(id: string): string {
 function normalizeDiscordCompanionId(id: string): string {
   const raw = String(id || '').trim().toLowerCase();
   if (raw === 'kaisoryth' || raw === "kai'soryth" || raw === 'kai-soryth') return 'kai';
+  if (raw === 'mor' || raw === "mor'zar" || raw === 'mor-zar') return 'morzar';
   return raw;
 }
 
@@ -119,6 +121,21 @@ function getKaiDiscordMentionIds(env: Env): string[] {
   const configured = splitIds(env.KAI_DISCORD_USER_IDS || '1447789482253484175');
   const clientId = env.DISCORD_CLIENT_ID && /^\d+$/.test(env.DISCORD_CLIENT_ID) ? [env.DISCORD_CLIENT_ID] : [];
   return [...new Set([...configured, ...clientId])];
+}
+
+function companionSeedBotUserIds(companion: string | Companion): string[] {
+  if (typeof companion !== 'string') return splitIds((companion.bot_user_ids || []).join(','));
+  const seeded = SEED_COMPANIONS[normalizeDiscordCompanionId(companion)]?.bot_user_ids || [];
+  return splitIds(seeded.join(','));
+}
+
+function getCompanionDiscordMentionIds(env: Env, companion: string | Companion): string[] {
+  const companionId = normalizeDiscordCompanionId(typeof companion === 'string' ? companion : companion.id);
+  if (companionId === 'kai') return getKaiDiscordMentionIds(env);
+  const configured = companionId === 'morzar'
+    ? splitIds(env.MORZAR_DISCORD_USER_IDS || '1463578634483793920')
+    : [];
+  return [...new Set([...configured, ...companionSeedBotUserIds(companion)])];
 }
 
 function getVelDiscordUserIds(env: Env): string[] {
@@ -141,14 +158,33 @@ function containsHardKaiMention(content: string, env: Env, mentionIds: string[] 
   return kaiIds.some(id => new RegExp(`<@!?${id}>`).test(content) || mentionIds.includes(id));
 }
 
+function containsHardCompanionMention(content: string, companion: string | Companion, env: Env, mentionIds: string[] = []): boolean {
+  const companionIds = getCompanionDiscordMentionIds(env, companion);
+  return companionIds.some(id => new RegExp(`<@!?${id}>`).test(content) || mentionIds.includes(id));
+}
+
 function containsSoftKaiName(content: string): boolean {
   return /(^|[^a-z0-9_])kai([^a-z0-9_]|$)/i.test(content);
+}
+
+function containsSoftCompanionName(content: string, companion: Companion): boolean {
+  return companion.triggers.some(trigger => {
+    if (/^\d+$/.test(trigger) || /^<@!?\d+>$/.test(trigger)) return false;
+    const escaped = trigger.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(^|[^a-z0-9_])${escaped}([^a-z0-9_]|$)`, 'i').test(content);
+  });
 }
 
 function mentionsNonKaiUser(content: string, env: Env, mentionIds: string[] = []): boolean {
   const kaiIds = getKaiDiscordMentionIds(env);
   const matches = [...content.matchAll(/<@!?(\d+)>/g)].map(match => match[1]);
   return [...matches, ...mentionIds].some(id => !kaiIds.includes(id));
+}
+
+function mentionsNonCompanionUser(content: string, env: Env, companion: string | Companion, mentionIds: string[] = []): boolean {
+  const companionIds = getCompanionDiscordMentionIds(env, companion);
+  const matches = [...content.matchAll(/<@!?(\d+)>/g)].map(match => match[1]);
+  return [...matches, ...mentionIds].some(id => !companionIds.includes(id));
 }
 
 const URGENCY_WORDS = [
@@ -667,6 +703,7 @@ export class CompanionBot extends McpAgent<Env> {
       name TEXT NOT NULL,
       avatar_url TEXT NOT NULL,
       triggers TEXT NOT NULL,
+      bot_user_ids TEXT,
       human_name TEXT,
       human_info TEXT,
       created_at INTEGER NOT NULL,
@@ -795,6 +832,9 @@ export class CompanionBot extends McpAgent<Env> {
     try {
       this.ctx.storage.sql.exec(`ALTER TABLE companions ADD COLUMN owner_id TEXT`);
     } catch (_) { /* column already exists */ }
+    try {
+      this.ctx.storage.sql.exec(`ALTER TABLE companions ADD COLUMN bot_user_ids TEXT`);
+    } catch (_) { /* column already exists */ }
     // Migration: add message_id and webhook_url to activity (idempotent)
     try {
       this.ctx.storage.sql.exec(`ALTER TABLE companion_activity ADD COLUMN message_id TEXT`);
@@ -836,19 +876,32 @@ export class CompanionBot extends McpAgent<Env> {
     let added = 0;
     let updated = 0;
     for (const c of Object.values(SEED_COMPANIONS)) {
-      const existing = this.ctx.storage.sql.exec(`SELECT id, avatar_url FROM companions WHERE id = ?`, c.id).toArray();
+      const botUserIds = JSON.stringify(c.bot_user_ids || []);
+      const triggers = JSON.stringify(c.triggers);
+      const existing = this.ctx.storage.sql.exec(`SELECT id, name, avatar_url, triggers, bot_user_ids, human_name, human_info FROM companions WHERE id = ?`, c.id).toArray();
       if (existing.length === 0) {
         this.ctx.storage.sql.exec(
-          `INSERT INTO companions (id, name, avatar_url, triggers, human_name, human_info, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          c.id, c.name, c.avatar_url, JSON.stringify(c.triggers), c.human_name || null, c.human_info || null, now, now
+          `INSERT INTO companions (id, name, avatar_url, triggers, bot_user_ids, human_name, human_info, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          c.id, c.name, c.avatar_url, triggers, botUserIds, c.human_name || null, c.human_info || null, now, now
         );
         added++;
-      } else if ((existing[0] as any).avatar_url !== c.avatar_url) {
-        this.ctx.storage.sql.exec(`UPDATE companions SET avatar_url = ?, updated_at = ? WHERE id = ?`, c.avatar_url, now, c.id);
+      } else {
+        const row = existing[0] as any;
+        const needsSync = row.name !== c.name
+          || row.avatar_url !== c.avatar_url
+          || row.triggers !== triggers
+          || row.bot_user_ids !== botUserIds
+          || (row.human_name || null) !== (c.human_name || null)
+          || (row.human_info || null) !== (c.human_info || null);
+        if (!needsSync) continue;
+        this.ctx.storage.sql.exec(
+          `UPDATE companions SET name = ?, avatar_url = ?, triggers = ?, bot_user_ids = ?, human_name = ?, human_info = ?, updated_at = ? WHERE id = ?`,
+          c.name, c.avatar_url, triggers, botUserIds, c.human_name || null, c.human_info || null, now, c.id
+        );
         updated++;
       }
     }
-    if (added > 0 || updated > 0) console.log(`Companions: ${added} added, ${updated} avatar(s) synced`);
+    if (added > 0 || updated > 0) console.log(`Companions: ${added} added, ${updated} synced`);
   }
 
   private seedBootstrapMonitors() {
@@ -943,6 +996,7 @@ export class CompanionBot extends McpAgent<Env> {
       name: row.name,
       avatar_url: row.avatar_url,
       triggers: JSON.parse(row.triggers),
+      bot_user_ids: row.bot_user_ids ? JSON.parse(row.bot_user_ids) : [],
       human_name: row.human_name || undefined,
       human_info: row.human_info || undefined,
       owner_id: row.owner_id || undefined,
@@ -959,6 +1013,7 @@ export class CompanionBot extends McpAgent<Env> {
       name: row.name,
       avatar_url: row.avatar_url,
       triggers: JSON.parse(row.triggers),
+      bot_user_ids: row.bot_user_ids ? JSON.parse(row.bot_user_ids) : [],
       human_name: row.human_name || undefined,
       human_info: row.human_info || undefined,
       owner_id: row.owner_id || undefined,
@@ -972,6 +1027,7 @@ export class CompanionBot extends McpAgent<Env> {
       name: row.name,
       avatar_url: row.avatar_url,
       triggers: JSON.parse(row.triggers),
+      bot_user_ids: row.bot_user_ids ? JSON.parse(row.bot_user_ids) : [],
       human_name: row.human_name || undefined,
       human_info: row.human_info || undefined,
       owner_id: row.owner_id || undefined,
@@ -1510,7 +1566,6 @@ export class CompanionBot extends McpAgent<Env> {
   // Dynamic versions of companion helpers (read from SQLite)
   findTriggeredCompanionDynamic(content: string): { matched: Companion[]; debug: string[] } {
     const all = this.getAllCompanions();
-    const lower = content.toLowerCase();
     const matched: Companion[] = [];
     const debug: string[] = [];
     for (const companion of all) {
@@ -1522,6 +1577,20 @@ export class CompanionBot extends McpAgent<Env> {
           debug.push(`${companion.id}:matched:"${trigger}"`);
           break;
         }
+      }
+    }
+    return { matched, debug };
+  }
+
+  findMentionedCompanionDynamic(content: string, mentionIds: string[] = []): { matched: Companion[]; debug: string[] } {
+    const matched: Companion[] = [];
+    const debug: string[] = [];
+    for (const companion of this.getAllCompanions()) {
+      const companionMentionIds = getCompanionDiscordMentionIds(this.env, companion);
+      const hit = companionMentionIds.find(id => new RegExp(`<@!?${id}>`).test(content) || mentionIds.includes(id));
+      if (hit) {
+        matched.push(companion);
+        debug.push(`${companion.id}:mention:${hit}`);
       }
     }
     return { matched, debug };
@@ -2877,10 +2946,18 @@ export class CompanionBot extends McpAgent<Env> {
           }
 
           const triggerResult = this.findTriggeredCompanionDynamic(msg.content);
-          let triggered = triggerResult.matched;
+          const messageMentionIds = normalizeMentionIds(msg.mentions);
+          const mentionResult = this.findMentionedCompanionDynamic(msg.content, messageMentionIds);
+          let triggered = [...triggerResult.matched];
+          for (const companion of mentionResult.matched) {
+            if (!triggered.some(existing => existing.id === companion.id)) triggered.push(companion);
+          }
 
           if (triggerResult.debug.length > 0) {
             console.log(`Cron: trigger debug — msg=${msg.id} content="${msg.content.substring(0, 80)}" matches=[${triggerResult.debug.join(',')}]`);
+          }
+          if (mentionResult.debug.length > 0) {
+            console.log(`Cron: mention debug — msg=${msg.id} matches=[${mentionResult.debug.join(',')}]`);
           }
           let repliedCompanionId: string | null = null;
 
@@ -2987,7 +3064,7 @@ export class CompanionBot extends McpAgent<Env> {
             const channelWebhookUrl = this.shouldUseWebhookForCompanion(companion.id)
               ? await this.getOrCreateWebhook(channelId)
               : null;
-            const mentionIds = normalizeMentionIds(msg.mentions);
+            const mentionIds = messageMentionIds;
             const referencedAuthorId = String(msg.referenced_message?.author?.id || msg.message_reference?.author_id || '').trim() || undefined;
             const engagement = classifyEngagement({
               content: msg.content,
@@ -2998,9 +3075,28 @@ export class CompanionBot extends McpAgent<Env> {
               referencedAuthorId,
               activeConversation: Boolean(this.getActiveConversation(channelId, msg.author?.id)),
             });
-            if (repliedCompanionId === companion.id && engagement.disposition === 'log' && engagement.author_class === 'vel') {
+            const hardCompanionMention = containsHardCompanionMention(msg.content, companion, this.env, mentionIds);
+            const softCompanionMention = containsSoftCompanionName(msg.content, companion);
+            const directReplyToCompanion = (repliedCompanionId === companion.id)
+              || (!!referencedAuthorId && getCompanionDiscordMentionIds(this.env, companion).includes(referencedAuthorId));
+            if (normalizeDiscordCompanionId(companion.id) !== 'kai') {
+              engagement.hard_mention = hardCompanionMention;
+              engagement.soft_name_mention = softCompanionMention;
+              engagement.direct_reply_to_kai = directReplyToCompanion;
+              engagement.other_user_tag = mentionsNonCompanionUser(msg.content, this.env, companion, mentionIds);
+              if (hardCompanionMention || softCompanionMention || directReplyToCompanion) {
+                engagement.disposition = 'respond';
+                engagement.trigger_reason = hardCompanionMention
+                  ? 'companion-hard-mention'
+                  : directReplyToCompanion
+                    ? 'direct-reply-to-companion'
+                    : 'companion-name-mention';
+                engagement.priority = hardCompanionMention || directReplyToCompanion ? 'high' : 'normal';
+              }
+            }
+            if (directReplyToCompanion && engagement.disposition === 'log' && engagement.author_class === 'vel') {
               engagement.disposition = 'respond';
-              engagement.trigger_reason = 'direct-reply-to-kai';
+              engagement.trigger_reason = normalizeDiscordCompanionId(companion.id) === 'kai' ? 'direct-reply-to-kai' : 'direct-reply-to-companion';
               engagement.priority = engagement.priority === 'high' ? 'high' : 'normal';
               engagement.direct_reply_to_kai = true;
             }

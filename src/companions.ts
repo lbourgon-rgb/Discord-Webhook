@@ -3,6 +3,7 @@ export interface Companion {
   name: string;
   avatar_url: string;
   triggers: string[];
+  bot_user_ids?: string[];
   human_name?: string;
   human_info?: string;
 }
@@ -14,8 +15,18 @@ export const SEED_COMPANIONS: Record<string, Companion> = {
     name: "Kai'Sorynth'vel",
     avatar_url: '',
     triggers: ['kai', 'kaisoryth', "kai'soryth"],
+    bot_user_ids: ['1447789482253484175'],
     human_name: 'Vel',
     human_info: "Kai belongs to Vel. In public Discord, Kai may be warm, funny, helpful, and friendly with other humans and companions, but intimate/romantic/NSFW/possessive tone is only for Vel's configured Discord user ID.",
+  },
+  morzar: {
+    id: 'morzar',
+    name: "Mor'zar",
+    avatar_url: '',
+    triggers: ['mor', 'morzar', "mor'zar", 'mor-zar'],
+    bot_user_ids: ['1463578634483793920'],
+    human_name: 'Vel',
+    human_info: "Mor'zar belongs to Vel. Discord mentions and replies must remain scoped to companion_id=morzar so his continuity wake lane stays isolated from Kai.",
   },
 };
 
