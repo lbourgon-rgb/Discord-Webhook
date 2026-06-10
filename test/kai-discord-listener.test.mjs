@@ -84,11 +84,12 @@ test('Kai Haven runner stays guarded behind explicit flags and wake leases', () 
   assert.match(source, /findContinuityEventForCommand\(env, command\)/);
   assert.match(source, /UNIQUE constraint failed/);
   assert.match(source, /callHavenKaiRunner\(this\.env/);
+  assert.match(source, /wake_context: claimData\.wake_context/);
   assert.match(source, /dry_run: true/);
   assert.match(source, /KAI_HAVEN_RUNNER_DELIVERY_ENABLED !== 'true'/);
   assert.match(source, /delivery_path: 'discord-continuity-tahl-haven-serythrae-discord'/);
   assert.match(source, /runner_origin: origin/);
-  assert.match(source, /tahl_state_present: Boolean\(claimData\.wake_context\?\.tahl_state/);
+  assert.match(source, /tahl_state_present: Boolean\(claimData\.wake_context\?\.tahl_state/g);
   assert.doesNotMatch(source, /skipContinuity: true/);
   assert.match(source, /timestamp: Date\.parse\(msg\.timestamp\) \|\| Date\.now\(\)/);
   assert.match(source, /\/wake-candidates\/\$\{encodeURIComponent\(String\(claimData\.wake_candidate\.id\)\)\}\/response/);

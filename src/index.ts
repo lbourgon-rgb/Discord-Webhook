@@ -3624,6 +3624,7 @@ export class CompanionBot extends McpAgent<Env> {
                     request_id: requestId,
                     channel_id: command.channel_id,
                     sent_message_ids: sentMessageIds,
+                    tahl_state_present: Boolean(claimData.wake_context?.tahl_state && Object.keys(claimData.wake_context.tahl_state).length),
                   },
                 }),
               });
