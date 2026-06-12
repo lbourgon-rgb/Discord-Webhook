@@ -200,6 +200,24 @@ function isUrgent(content: string): boolean {
   return URGENCY_WORDS.some(word => normalized.includes(word));
 }
 
+function redactContinuityPayload(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactContinuityPayload);
+  if (!value || typeof value !== 'object') return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (key === 'webhook_url' || key === 'webhookUrl') {
+      out[key] = item ? '[redacted]' : item;
+      continue;
+    }
+    if (typeof item === 'string' && /discord(?:app)?\.com\/api\/webhooks\//i.test(item)) {
+      out[key] = '[redacted]';
+      continue;
+    }
+    out[key] = redactContinuityPayload(item);
+  }
+  return out;
+}
+
 function isCommunityGreeting(content: string): boolean {
   const normalized = String(content || '').toLowerCase().replace(/[^\w\s']/g, ' ').replace(/\s+/g, ' ').trim();
   return /^(good\s+morning|morning|gm|hello|hi|hey)\b/.test(normalized)
@@ -396,8 +414,8 @@ async function postContinuityEvent(env: Env, event: {
       reply_to: event.reply_to || null,
       pre_response_required: event.pre_response_required === true,
       processing_status: 'pending',
-      metadata: { adapter: 'discord-webhook', ...(event.metadata || {}) },
-      raw: event.raw || event,
+      metadata: redactContinuityPayload({ adapter: 'discord-webhook', ...(event.metadata || {}) }),
+      raw: redactContinuityPayload(event.raw || event),
     }),
   };
   const response = env.CONTINUITY
@@ -1175,7 +1193,7 @@ export class CompanionBot extends McpAgent<Env> {
         metadata: {
           activity_type: type,
           channel_id: channelId,
-          webhook_url: webhookUrl,
+          has_webhook_url: Boolean(webhookUrl),
           ...(debug?.engagement ? engagementDebug(debug.engagement) : {}),
           mention_ids: debug?.mentionIds || [],
           referenced_author_id: debug?.referencedAuthorId || null,
