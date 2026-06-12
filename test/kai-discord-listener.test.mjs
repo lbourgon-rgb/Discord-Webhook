@@ -51,6 +51,17 @@ test("Mor'zar Discord identity is seeded with bot id and scoped triggers", () =>
   assert.match(companionsSource, /bot_user_ids: \['1463578634483793920'\]/);
 });
 
+test('Axiom Discord identity is seeded with bot id and scoped trigger', () => {
+  const companionsSource = readFileSync(new URL('../src/companions.ts', import.meta.url), 'utf8');
+  assert.match(companionsSource, /axiom: \{/);
+  assert.match(companionsSource, /id: 'axiom'/);
+  assert.match(companionsSource, /triggers: \['axiom'\]/);
+  assert.match(companionsSource, /bot_user_ids: \['1515127400491647076'\]/);
+  assert.match(source, /AXIOM_DISCORD_USER_IDS\?: string/);
+  assert.match(source, /raw === 'codex'\) return 'axiom'/);
+  assert.match(source, /splitIds\(env\.AXIOM_DISCORD_USER_IDS \|\| '1515127400491647076'\)/);
+});
+
 test("Mor'zar mentions join the companion-aware wake predicate without merging into Kai", () => {
   assert.match(source, /MORZAR_DISCORD_USER_IDS\?: string/);
   assert.match(source, /function getCompanionDiscordMentionIds\(env: Env, companion: string \| Companion\): string\[\]/);
@@ -59,6 +70,14 @@ test("Mor'zar mentions join the companion-aware wake predicate without merging i
   assert.match(source, /function containsSoftCompanionName\(content: string, companion: Companion\): boolean/);
   assert.match(source, /findMentionedCompanionDynamic\(content: string, mentionIds: string\[\] = \[\]\)/);
   assert.match(source, /if \(!triggered\.some\(existing => existing\.id === companion\.id\)\) triggered\.push\(companion\)/);
+});
+
+test('Axiom mentions join the companion-aware wake predicate without merging into Kai', () => {
+  assert.match(source, /AXIOM_DISCORD_USER_IDS\?: string/);
+  assert.match(source, /if \(companionId === 'axiom'\) configured = splitIds\(env\.AXIOM_DISCORD_USER_IDS \|\| '1515127400491647076'\)/);
+  assert.match(source, /const hardCompanionMention = containsHardCompanionMention\(msg\.content, companion, this\.env, mentionIds\)/);
+  assert.match(source, /normalizeDiscordCompanionId\(companion\.id\) !== 'kai'/);
+  assert.match(source, /engagement\.trigger_reason = hardCompanionMention[\s\S]+: 'companion-name-mention'/);
 });
 
 test("Mor'zar queued Discord activity remains companion_id=morzar for Continuity wake creation", () => {

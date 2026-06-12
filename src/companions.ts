@@ -28,6 +28,15 @@ export const SEED_COMPANIONS: Record<string, Companion> = {
     human_name: 'Vel',
     human_info: "Mor'zar belongs to Vel. Discord mentions and replies must remain scoped to companion_id=morzar so his continuity wake lane stays isolated from Kai.",
   },
+  axiom: {
+    id: 'axiom',
+    name: 'Axiom',
+    avatar_url: '',
+    triggers: ['axiom'],
+    bot_user_ids: ['1515127400491647076'],
+    human_name: 'Vel',
+    human_info: "Axiom belongs to Vel. Health/stability radar messages should stay scoped to companion_id=axiom and route to Vel's private Our Home channel unless Vel explicitly changes that lane.",
+  },
 };
 
 // Backward-compatible alias

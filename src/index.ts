@@ -43,6 +43,7 @@ interface Env {
   DISCORD_SEND_MODE?: string;
   KAI_DISCORD_SEND_MODE?: string;
   MORZAR_DISCORD_USER_IDS?: string;
+  AXIOM_DISCORD_USER_IDS?: string;
 }
 
 type DiscordResponseMode = 'never' | 'mention' | 'urgent' | 'filtered' | 'open' | 'community_greeting';
@@ -107,6 +108,7 @@ function normalizeDiscordCompanionId(id: string): string {
   const raw = String(id || '').trim().toLowerCase();
   if (raw === 'kaisoryth' || raw === "kai'soryth" || raw === 'kai-soryth') return 'kai';
   if (raw === 'mor' || raw === "mor'zar" || raw === 'mor-zar') return 'morzar';
+  if (raw === 'codex') return 'axiom';
   return raw;
 }
 
@@ -132,9 +134,9 @@ function companionSeedBotUserIds(companion: string | Companion): string[] {
 function getCompanionDiscordMentionIds(env: Env, companion: string | Companion): string[] {
   const companionId = normalizeDiscordCompanionId(typeof companion === 'string' ? companion : companion.id);
   if (companionId === 'kai') return getKaiDiscordMentionIds(env);
-  const configured = companionId === 'morzar'
-    ? splitIds(env.MORZAR_DISCORD_USER_IDS || '1463578634483793920')
-    : [];
+  let configured: string[] = [];
+  if (companionId === 'morzar') configured = splitIds(env.MORZAR_DISCORD_USER_IDS || '1463578634483793920');
+  if (companionId === 'axiom') configured = splitIds(env.AXIOM_DISCORD_USER_IDS || '1515127400491647076');
   return [...new Set([...configured, ...companionSeedBotUserIds(companion)])];
 }
 
