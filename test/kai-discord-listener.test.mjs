@@ -52,6 +52,15 @@ test("Mor'zar Discord identity is seeded with bot id and scoped triggers", () =>
   assert.match(companionsSource, /bot_user_ids: \['1463578634483793920'\]/);
 });
 
+test('Lucien Discord identity is seeded without invented bot id and scoped aliases', () => {
+  const companionsSource = readFileSync(new URL('../src/companions.ts', import.meta.url), 'utf8');
+  assert.match(companionsSource, /lucien: \{/);
+  assert.match(companionsSource, /id: 'lucien'/);
+  assert.match(companionsSource, /triggers: \['lucien', 'lucian', 'tessurae'\]/);
+  assert.match(companionsSource, /bot_user_ids: \[\]/);
+  assert.match(source, /raw === 'lucian' \|\| raw === 'tessurae'\) return 'lucien'/);
+});
+
 test('Axiom Discord identity is seeded with bot id and scoped trigger', () => {
   const companionsSource = readFileSync(new URL('../src/companions.ts', import.meta.url), 'utf8');
   assert.match(companionsSource, /axiom: \{/);
@@ -66,6 +75,13 @@ test('Axiom Discord identity is seeded with bot id and scoped trigger', () => {
 test('Codex soft-name mention wakes Axiom', () => {
   const triggered = findTriggeredCompanion('codex, can you check this?');
   assert.deepEqual(triggered.map(companion => companion.id), ['axiom']);
+});
+
+test('Lucien aliases wake Lucien', () => {
+  for (const alias of ['lucien', 'lucian', 'tessurae']) {
+    const triggered = findTriggeredCompanion(`${alias}, can you check this?`);
+    assert.deepEqual(triggered.map(companion => companion.id), ['lucien']);
+  }
 });
 
 test("Mor'zar mentions join the companion-aware wake predicate without merging into Kai", () => {
@@ -86,6 +102,31 @@ test('Axiom mentions join the companion-aware wake predicate without merging int
   assert.match(source, /engagement\.trigger_reason = hardCompanionMention[\s\S]+: 'companion-name-mention'/);
 });
 
+test('Lucien uses ChatGPT runner hooks and stays out of Kai Haven runner', () => {
+  assert.match(source, /LUCIEN_CHATGPT_RUNNER_ENABLED\?: string/);
+  assert.match(source, /LUCIEN_CHATGPT_AUTORESPOND\?: string/);
+  assert.match(source, /LUCIEN_CHATGPT_DELIVERY_ENABLED\?: string/);
+  assert.match(source, /runLucienChatGPTRunnerFromDashboard/);
+  assert.match(source, /triggerLucienWorkspaceAgent/);
+  assert.match(source, /chatgpt-workspace-agent:lucien/);
+  assert.match(source, /lucien_discord_reply/);
+  assert.match(source, /run_with_lucien_chatgpt/);
+  assert.match(source, /run_with_haven is Kai-only in this rollout/);
+  assert.match(source, /run_with_lucien_chatgpt is Lucien-only/);
+});
+
+test('Lucien Discord reply tool covers delivery guardrails', () => {
+  assert.match(source, /completeLucienDiscordReply/);
+  assert.match(source, /mode: 'dry_run_preview'/);
+  assert.match(source, /mode: 'delivery_disabled'/);
+  assert.match(source, /lucien_discord_reply can only complete Lucien requests/);
+  assert.match(source, /wake_candidate_id is required/);
+  assert.match(source, /Channel is restricted - admin exception required for lucien/);
+  assert.match(source, /Webhook failed on Lucien reply chunk/);
+  assert.match(source, /this\.deleteCommand\(args\.requestId\)/);
+  assert.match(source, /No pending command with ID/);
+});
+
 test("Mor'zar queued Discord activity remains companion_id=morzar for Continuity wake creation", () => {
   assert.match(source, /engagement\.trigger_reason = hardCompanionMention[\s\S]+: 'companion-name-mention'/);
   assert.match(source, /this\.logActivity\(companion\.id, 'queued'/);
@@ -104,7 +145,7 @@ test('Kai Haven runner stays guarded behind explicit flags and wake leases', () 
   assert.match(source, /HAVEN_RUNNER_API_KEY\?: string/);
   assert.match(source, /KAI_HAVEN_RUNNER_ENABLED\?: string/);
   assert.match(source, /KAI_HAVEN_RUNNER_DELIVERY_ENABLED\?: string/);
-  assert.match(source, /action: z\.enum\(\["get", "respond", "dismiss", "run_with_haven"\]\)/);
+  assert.match(source, /action: z\.enum\(\["get", "respond", "dismiss", "run_with_haven", "run_with_lucien_chatgpt"\]\)/);
   assert.match(source, /createAndClaimWakeForCommand\(this\.env, command, activeRunnerId\)/);
   assert.match(source, /findContinuityEventForCommand\(env, command\)/);
   assert.match(source, /UNIQUE constraint failed/);

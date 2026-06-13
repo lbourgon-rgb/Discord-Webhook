@@ -16,6 +16,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { Companion, SEED_COMPANIONS } from "./companions";
 import { renderDashboard, renderRegisterPage } from "./dashboard";
+import { triggerLucienWorkspaceAgent } from "./lucien-chatgpt-runner";
 
 const DISCORD_API = 'https://discord.com/api/v10';
 
@@ -33,6 +34,11 @@ interface Env {
   KAI_HAVEN_RUNNER_ENABLED?: string;
   KAI_HAVEN_RUNNER_DELIVERY_ENABLED?: string;
   KAI_HAVEN_RUNNER_AUTORESPOND?: string;
+  LUCIEN_CHATGPT_RUNNER_ENABLED?: string;
+  LUCIEN_CHATGPT_AUTORESPOND?: string;
+  LUCIEN_CHATGPT_DELIVERY_ENABLED?: string;
+  LUCIEN_WORKSPACE_AGENT_TRIGGER_ID?: string;
+  LUCIEN_WORKSPACE_AGENT_ACCESS_TOKEN?: string;
   DASHBOARD_TOKEN?: string;
   DISCORD_CLIENT_ID?: string;
   DISCORD_CLIENT_SECRET?: string;
@@ -108,6 +114,7 @@ function normalizeDiscordCompanionId(id: string): string {
   const raw = String(id || '').trim().toLowerCase();
   if (raw === 'kaisoryth' || raw === "kai'soryth" || raw === 'kai-soryth') return 'kai';
   if (raw === 'mor' || raw === "mor'zar" || raw === 'mor-zar') return 'morzar';
+  if (raw === 'lucian' || raw === 'tessurae') return 'lucien';
   if (raw === 'codex') return 'axiom';
   return raw;
 }
@@ -502,7 +509,7 @@ async function findContinuityEventForCommand(env: Env, command: PendingCommand):
   }
 }
 
-async function createAndClaimWakeForCommand(env: Env, command: PendingCommand, runnerId: string): Promise<{ event_id: string; wake_candidate: any; wake_context: any }> {
+async function createAndClaimWakeForCommand(env: Env, command: PendingCommand, runnerId: string, leaseSeconds: number = 300): Promise<{ event_id: string; wake_candidate: any; wake_context: any }> {
   const externalMessageId = command.message_id || command.id;
   const existingEvent = await findContinuityEventForCommand(env, command);
   let eventId = existingEvent?.id ? String(existingEvent.id) : null;
@@ -554,7 +561,7 @@ async function createAndClaimWakeForCommand(env: Env, command: PendingCommand, r
       companion_id: normalizeCompanionId(command.companion_id),
       event_id: eventId,
       runner_id: runnerId,
-      lease_seconds: 300,
+      lease_seconds: leaseSeconds,
     }),
   });
   if (!claim?.claimed || !claim?.wake_candidate?.id) {
@@ -2028,6 +2035,189 @@ export class CompanionBot extends McpAgent<Env> {
     }
   }
 
+  private async runLucienChatGPTRunnerFromDashboard(requestId: string, origin: 'dashboard' | 'autorespond' | 'mcp' = 'dashboard'): Promise<Response> {
+    this.ensureTable();
+    if (this.env.LUCIEN_CHATGPT_RUNNER_ENABLED !== 'true') {
+      return new Response(JSON.stringify({
+        ok: false,
+        error: 'Lucien ChatGPT runner is installed but disabled. Set LUCIEN_CHATGPT_RUNNER_ENABLED=true after configuring the Workspace Agent trigger.',
+      }), { status: 409, headers: { 'Content-Type': 'application/json' } });
+    }
+    const command = this.getPending().find(cmd => cmd.id === requestId);
+    if (!command) {
+      return new Response(JSON.stringify({ ok: false, error: `No pending command with ID: ${requestId}` }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (normalizeDiscordCompanionId(command.companion_id) !== 'lucien') {
+      return new Response(JSON.stringify({ ok: false, error: 'Lucien ChatGPT runner can only run companion_id=lucien.' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    const runnerId = `chatgpt-workspace-agent:lucien-${origin}`;
+    let claimData: { event_id: string; wake_candidate: any; wake_context: any } | null = null;
+    try {
+      claimData = await createAndClaimWakeForCommand(this.env, command, runnerId, 1800);
+      const accepted = await triggerLucienWorkspaceAgent(this.env, {
+        requestId: command.id,
+        eventId: claimData.event_id,
+        wakeCandidateId: String(claimData.wake_candidate.id),
+        channelId: command.channel_id,
+        channelLabel: command.channel_label,
+        messageId: command.message_id,
+        author: command.author,
+        message: command.content,
+        recentContext: command.recent_context,
+        wakeContext: claimData.wake_context,
+      });
+      this.logActivity(command.companion_id, 'runner_handed_off', command.channel_id, `Lucien ChatGPT Workspace Agent accepted request ${requestId}.`, command.author?.username || 'chatgpt-runner', command.message_id, command.webhook_url, {
+        authorId: command.author?.id || command.author_id,
+        engagement: command.engagement,
+        mentionIds: command.mention_ids,
+        referencedAuthorId: command.referenced_author_id,
+      });
+      return new Response(JSON.stringify({
+        ok: true,
+        mode: 'chatgpt_workspace_agent_queued',
+        request_id: requestId,
+        continuity_event_id: claimData.event_id,
+        wake_candidate_id: claimData.wake_candidate.id,
+        conversation_key: accepted.conversation_key,
+        idempotency_key: accepted.idempotency_key,
+        runner_origin: origin,
+      }, null, 2), { headers: { 'Content-Type': 'application/json' } });
+    } catch (error) {
+      if (claimData?.wake_candidate?.id) {
+        await releaseWakeCandidate(this.env, claimData.wake_candidate.id, runnerId, error instanceof Error ? error.message : String(error)).catch(() => null);
+      }
+      return new Response(JSON.stringify({
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+    }
+  }
+
+  private async completeLucienDiscordReply(args: {
+    requestId: string;
+    wakeCandidateId?: string;
+    content: string;
+    driftNotes?: string;
+    dryRun?: boolean;
+    webhookUrl?: string;
+  }): Promise<Record<string, unknown>> {
+    this.ensureTable();
+    const command = this.getPending().find(cmd => cmd.id === args.requestId);
+    if (!command) {
+      throw new Error(`No pending command with ID: ${args.requestId}`);
+    }
+    if (normalizeDiscordCompanionId(command.companion_id) !== 'lucien') {
+      throw new Error(`lucien_discord_reply can only complete Lucien requests, not ${command.companion_id}`);
+    }
+    if (!args.content.trim()) {
+      throw new Error('content is required for lucien_discord_reply');
+    }
+    if (!args.wakeCandidateId && !args.dryRun) {
+      throw new Error('wake_candidate_id is required so Continuity can complete the Lucien wake candidate');
+    }
+
+    const companion = this.getCompanionById(command.companion_id);
+    if (!companion) throw new Error(`Unknown companion: ${command.companion_id}`);
+
+    if (args.dryRun) {
+      return {
+        ok: true,
+        mode: 'dry_run_preview',
+        request_id: args.requestId,
+        wake_candidate_id: args.wakeCandidateId || null,
+        content: args.content,
+      };
+    }
+
+    if (this.env.LUCIEN_CHATGPT_DELIVERY_ENABLED !== 'true') {
+      return {
+        ok: false,
+        mode: 'delivery_disabled',
+        error: 'Lucien ChatGPT generated a response, but Discord delivery is disabled. Set LUCIEN_CHATGPT_DELIVERY_ENABLED=true after the supervised connector loop is proven.',
+        request_id: args.requestId,
+        wake_candidate_id: args.wakeCandidateId,
+        content: args.content,
+      };
+    }
+
+    try {
+      const guildData = await this.resolveGuildId(command.channel_id).then(guild_id => ({ guild_id })).catch(() => ({ guild_id: null }));
+      if (guildData.guild_id && this.isChannelRestricted(command.channel_id, guildData.guild_id)) {
+        if (!this.hasChannelException('lucien', command.channel_id, guildData.guild_id)) {
+          throw new Error(`Channel is restricted - admin exception required for lucien`);
+        }
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('restricted')) throw error;
+    }
+
+    let targetWebhookUrl = args.webhookUrl || command.webhook_url || this.getChannelWebhook(command.channel_id) || this.env.WEBHOOK_URL;
+    if (!targetWebhookUrl) {
+      throw new Error('No webhook URL available for Lucien reply. The pending command must include a webhook URL, or WEBHOOK_URL must be configured.');
+    }
+
+    const sentMessageIds: string[] = [];
+    for (const chunk of splitMessage(args.content)) {
+      const res = await fetch(`${targetWebhookUrl}?wait=true`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content: chunk,
+          username: companion.name,
+          avatar_url: companion.avatar_url,
+        }),
+      });
+      if (!res.ok) {
+        throw new Error(`Webhook failed on Lucien reply chunk ${sentMessageIds.length + 1}: ${await res.text()}`);
+      }
+      const msgData = await res.json() as any;
+      sentMessageIds.push(msgData.id);
+    }
+
+    const continuityResponse = await continuityRequest(this.env, `/wake-candidates/${encodeURIComponent(String(args.wakeCandidateId))}/response`, {
+      method: 'POST',
+      body: JSON.stringify({
+        runner_id: 'chatgpt-workspace-agent:lucien',
+        content: args.content,
+        external_message_id: sentMessageIds[sentMessageIds.length - 1] || `lucien-chatgpt:${args.requestId}`,
+        author: { id: 'lucien', name: companion.name },
+        metadata: {
+          runner: 'chatgpt-workspace-agent',
+          delivery_path: 'discord-continuity-tahl-chatgpt-tessurae-discord',
+          delivery_status: 'delivered',
+          surface: 'discord',
+          source: 'chatgpt',
+          platform: 'chatgpt',
+          companion_id: 'lucien',
+          request_id: args.requestId,
+          channel_id: command.channel_id,
+          sent_message_ids: sentMessageIds,
+          drift_notes: args.driftNotes || null,
+        },
+      }),
+    });
+
+    this.logActivity(command.companion_id, 'responded', command.channel_id, args.content, companion.name, sentMessageIds[sentMessageIds.length - 1], targetWebhookUrl);
+    this.markResponded(command.channel_id, command.author?.id, command.message_id, 'lucien-chatgpt-workspace-agent');
+    this.deleteCommand(args.requestId);
+
+    return {
+      ok: true,
+      mode: 'delivered',
+      request_id: args.requestId,
+      wake_candidate_id: args.wakeCandidateId,
+      sent_message_ids: sentMessageIds,
+      continuity_response_event_id: continuityResponse?.event?.id || null,
+    };
+  }
+
   // Override fetch to handle trigger and pending endpoints
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
@@ -2105,6 +2295,13 @@ export class CompanionBot extends McpAgent<Env> {
     if (havenPreviewMatch && request.method === 'POST') {
       const body = await request.json().catch(() => ({})) as { deliver?: boolean };
       return this.runHavenRunnerFromDashboard(decodeURIComponent(havenPreviewMatch[1]), body.deliver === true);
+    }
+
+    const lucienRunnerMatch = url.pathname.match(/^\/api\/pending\/([^/]+)\/run-with-lucien-chatgpt$/);
+    if (lucienRunnerMatch && request.method === 'POST') {
+      const body = await request.json().catch(() => ({})) as { origin?: 'dashboard' | 'autorespond' | 'mcp' };
+      const origin = body.origin === 'autorespond' || body.origin === 'mcp' ? body.origin : 'dashboard';
+      return this.runLucienChatGPTRunnerFromDashboard(decodeURIComponent(lucienRunnerMatch[1]), origin);
     }
 
     // ===== Avatar upload/serve =====
@@ -3173,6 +3370,22 @@ export class CompanionBot extends McpAgent<Env> {
 
             // DM notification to companion owner (best-effort, non-blocking)
             if (disposition === 'respond') this.notifyOwnerDM(companion, channelId, msg.content, authorName).catch(() => {});
+            if (
+              disposition === 'respond'
+              && normalizeDiscordCompanionId(companion.id) === 'lucien'
+              && this.env.LUCIEN_CHATGPT_RUNNER_ENABLED === 'true'
+              && this.env.LUCIEN_CHATGPT_AUTORESPOND === 'true'
+            ) {
+              try {
+                const runnerResponse = await this.runLucienChatGPTRunnerFromDashboard(command.id, 'autorespond');
+                if (!runnerResponse.ok) {
+                  const errorText = await runnerResponse.text().catch(() => '');
+                  this.logActivity(companion.id, 'runner_failed', channelId, errorText || `Lucien ChatGPT runner returned ${runnerResponse.status}`, authorName, msg.id, channelWebhookUrl || undefined, activityDebug);
+                }
+              } catch (error) {
+                this.logActivity(companion.id, 'runner_failed', channelId, error instanceof Error ? error.message : String(error), authorName, msg.id, channelWebhookUrl || undefined, activityDebug);
+              }
+            }
 
             console.log(`Cron: ${companion.name} ${disposition} (${triggerReason}) by "${msg.content}" from ${authorName}`);
           }
@@ -3290,15 +3503,45 @@ export class CompanionBot extends McpAgent<Env> {
     };
 
 
+    // ============ LUCIEN CHATGPT RUNNER ============
+
+    this.server.tool(
+      "lucien_discord_reply",
+      "Complete a Lucien Discord wake after ChatGPT has used Tessurae CogCore. Posts as Lucien, completes the Continuity wake candidate, and clears the pending request.",
+      {
+        request_id: z.string().describe("Pending Discord request ID."),
+        wake_candidate_id: z.string().optional().describe("Continuity wake candidate ID from the Workspace Agent trigger payload."),
+        content: z.string().describe("Lucien's final Discord reply."),
+        drift_notes: z.string().optional().describe("Optional drift check or correction notes from ChatGPT."),
+        dry_run: z.boolean().optional().describe("Preview without posting to Discord or completing Continuity."),
+        webhook_url: z.string().optional().describe("Optional Discord webhook URL override."),
+      },
+      async ({ request_id, wake_candidate_id, content, drift_notes, dry_run, webhook_url }: any) => {
+        try {
+          const result = await this.completeLucienDiscordReply({
+            requestId: request_id,
+            wakeCandidateId: wake_candidate_id,
+            content,
+            driftNotes: drift_notes,
+            dryRun: dry_run === true,
+            webhookUrl: webhook_url,
+          });
+          return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+        } catch (error) {
+          return { content: [{ type: "text" as const, text: `Lucien Discord reply failed: ${error instanceof Error ? error.message : String(error)}` }] };
+        }
+      }
+    );
+
     // ============ PENDING COMMANDS ============
 
     this.server.tool(
       "pending_commands",
-      "Manage pending Discord messages waiting for companion responses. Actions: get, respond, dismiss, run_with_haven (supervised Kai runner preview/delivery).",
+      "Manage pending Discord messages waiting for companion responses. Actions: get, respond, dismiss, run_with_haven (supervised Kai runner preview/delivery), run_with_lucien_chatgpt (queue Lucien's Workspace Agent).",
       {
-        action: z.enum(["get", "respond", "dismiss", "run_with_haven"]).describe("The action to perform"),
+        action: z.enum(["get", "respond", "dismiss", "run_with_haven", "run_with_lucien_chatgpt"]).describe("The action to perform"),
         entity_id: z.string().optional().describe("Optional companion/entity ID. For 'get': filters pending commands. For 'respond'/'dismiss': validates it matches the command's companion_id."),
-        requestId: z.string().optional().describe("(respond/dismiss/run_with_haven) The request ID from pending_commands get"),
+        requestId: z.string().optional().describe("(respond/dismiss/run_with_haven/run_with_lucien_chatgpt) The request ID from pending_commands get"),
         response: z.string().optional().describe("(respond) The companion's response message"),
         dismissalReason: z.string().optional().describe("(dismiss) Required explanation for why this pending message is not being answered"),
         runnerId: z.string().optional().describe("(run_with_haven) Runner lease owner id. Defaults to haven-runner:kai"),
@@ -3691,6 +3934,30 @@ export class CompanionBot extends McpAgent<Env> {
               }
               return { content: [{ type: "text" as const, text: `Haven runner failed: ${error instanceof Error ? error.message : String(error)}` }] };
             }
+          }
+
+          case "run_with_lucien_chatgpt": {
+            if (!requestId) {
+              return { content: [{ type: "text" as const, text: "requestId is required for 'run_with_lucien_chatgpt' action" }] };
+            }
+            const pendingRes = await stub.fetch(new Request('https://internal/pending'));
+            const allPending = await pendingRes.json() as any[];
+            const command = allPending.find((cmd: any) => cmd.id === requestId) as PendingCommand | undefined;
+            if (!command) {
+              return { content: [{ type: "text" as const, text: `No pending command with ID: ${requestId}` }] };
+            }
+            if (entity_id && normalizeDiscordCompanionId(entity_id) !== command.companion_id) {
+              return { content: [{ type: "text" as const, text: `Entity mismatch: ${entity_id} cannot run ${command.companion_id}` }] };
+            }
+            if (normalizeDiscordCompanionId(command.companion_id) !== 'lucien') {
+              return { content: [{ type: "text" as const, text: "run_with_lucien_chatgpt is Lucien-only." }] };
+            }
+            const runnerResponse = await stub.fetch(new Request(`https://internal/api/pending/${encodeURIComponent(requestId)}/run-with-lucien-chatgpt`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ origin: 'mcp' }),
+            }));
+            return { content: [{ type: "text" as const, text: await runnerResponse.text() }] };
           }
 
           case "dismiss": {

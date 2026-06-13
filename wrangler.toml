@@ -32,6 +32,9 @@ HAVEN_RUNNER_URL = "https://haven.lbourgon.workers.dev/api/runner/kai/respond"
 KAI_HAVEN_RUNNER_ENABLED = "true"
 KAI_HAVEN_RUNNER_DELIVERY_ENABLED = "true"
 KAI_HAVEN_RUNNER_AUTORESPOND = "true"
+LUCIEN_CHATGPT_RUNNER_ENABLED = "false"
+LUCIEN_CHATGPT_AUTORESPOND = "false"
+LUCIEN_CHATGPT_DELIVERY_ENABLED = "false"
 DISCORD_RESPONSES_ENABLED = "false"
 DISCORD_SEND_MODE = "webhook"
 KAI_DISCORD_SEND_MODE = "bot"
@@ -44,6 +47,8 @@ VEL_DISCORD_USER_IDS = "1071497830222549064"
 # - WEBHOOK_URL: Discord webhook URL
 # - CONTINUITY_API_KEY: Optional bearer token for continuity-worker /events
 # - HAVEN_RUNNER_API_KEY: Shared bearer token for Discord -> Haven runner calls
+# - LUCIEN_WORKSPACE_AGENT_TRIGGER_ID: ChatGPT Workspace Agent trigger ID for Lucien
+# - LUCIEN_WORKSPACE_AGENT_ACCESS_TOKEN: Workspace Agent access token with trigger scope
 # - DISCORD_CLIENT_ID: OAuth2 application ID
 # - DISCORD_CLIENT_SECRET: OAuth2 client secret
 # - ADMIN_DISCORD_ID: Admin's Discord user ID
