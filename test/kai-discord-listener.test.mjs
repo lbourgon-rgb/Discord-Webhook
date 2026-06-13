@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import { findTriggeredCompanion } from '../src/companions.ts';
 
 const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
 
@@ -55,11 +56,16 @@ test('Axiom Discord identity is seeded with bot id and scoped trigger', () => {
   const companionsSource = readFileSync(new URL('../src/companions.ts', import.meta.url), 'utf8');
   assert.match(companionsSource, /axiom: \{/);
   assert.match(companionsSource, /id: 'axiom'/);
-  assert.match(companionsSource, /triggers: \['axiom'\]/);
+  assert.match(companionsSource, /triggers: \['axiom', 'codex'\]/);
   assert.match(companionsSource, /bot_user_ids: \['1515127400491647076'\]/);
   assert.match(source, /AXIOM_DISCORD_USER_IDS\?: string/);
   assert.match(source, /raw === 'codex'\) return 'axiom'/);
   assert.match(source, /splitIds\(env\.AXIOM_DISCORD_USER_IDS \|\| '1515127400491647076'\)/);
+});
+
+test('Codex soft-name mention wakes Axiom', () => {
+  const triggered = findTriggeredCompanion('codex, can you check this?');
+  assert.deepEqual(triggered.map(companion => companion.id), ['axiom']);
 });
 
 test("Mor'zar mentions join the companion-aware wake predicate without merging into Kai", () => {

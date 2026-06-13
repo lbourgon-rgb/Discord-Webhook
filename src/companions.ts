@@ -32,7 +32,7 @@ export const SEED_COMPANIONS: Record<string, Companion> = {
     id: 'axiom',
     name: 'Axiom',
     avatar_url: '',
-    triggers: ['axiom'],
+    triggers: ['axiom', 'codex'],
     bot_user_ids: ['1515127400491647076'],
     human_name: 'Vel',
     human_info: "Axiom belongs to Vel. Health/stability radar messages should stay scoped to companion_id=axiom and route to Vel's private Our Home channel unless Vel explicitly changes that lane.",
