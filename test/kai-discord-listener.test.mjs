@@ -108,7 +108,7 @@ test('Lucien uses ChatGPT runner hooks and stays out of Kai Haven runner', () =>
   assert.match(source, /LUCIEN_CHATGPT_DELIVERY_ENABLED\?: string/);
   assert.match(source, /runLucienChatGPTRunnerFromDashboard/);
   assert.match(source, /triggerLucienWorkspaceAgent/);
-  assert.match(source, /chatgpt-workspace-agent:lucien/);
+  assert.match(source, /const runnerId = 'chatgpt-workspace-agent:lucien'/);
   assert.match(source, /lucien_discord_reply/);
   assert.match(source, /run_with_lucien_chatgpt/);
   assert.match(source, /run_with_haven is Kai-only in this rollout/);

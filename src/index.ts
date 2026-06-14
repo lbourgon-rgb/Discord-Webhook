@@ -2057,7 +2057,7 @@ export class CompanionBot extends McpAgent<Env> {
       });
     }
 
-    const runnerId = `chatgpt-workspace-agent:lucien-${origin}`;
+    const runnerId = 'chatgpt-workspace-agent:lucien';
     let claimData: { event_id: string; wake_candidate: any; wake_context: any } | null = null;
     try {
       claimData = await createAndClaimWakeForCommand(this.env, command, runnerId, 1800);
