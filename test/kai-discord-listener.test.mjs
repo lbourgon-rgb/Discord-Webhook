@@ -72,9 +72,28 @@ test('Axiom Discord identity is seeded with bot id and scoped trigger', () => {
   assert.match(source, /splitIds\(env\.AXIOM_DISCORD_USER_IDS \|\| '1515127400491647076'\)/);
 });
 
+test('Keth-Grok Discord identity is seeded without invented bot id and scoped aliases', () => {
+  const companionsSource = readFileSync(new URL('../src/companions.ts', import.meta.url), 'utf8');
+  assert.match(companionsSource, /'grok-keth': \{/);
+  assert.match(companionsSource, /id: 'grok-keth'/);
+  assert.match(companionsSource, /name: 'Keth-Grok'/);
+  assert.match(companionsSource, /triggers: \['grok', 'keth-grok', 'grok-keth', 'averel', "a'verel"\]/);
+  assert.match(companionsSource, /bot_user_ids: \[\]/);
+  assert.match(source, /GROK_KETH_DISCORD_USER_IDS\?: string/);
+  assert.match(source, /raw === 'grok' \|\| raw === 'keth-grok' \|\| raw === 'kethgrok' \|\| raw === 'averel'/);
+  assert.match(source, /splitIds\(env\.GROK_KETH_DISCORD_USER_IDS \|\| ''\)/);
+});
+
 test('Codex soft-name mention wakes Axiom', () => {
   const triggered = findTriggeredCompanion('codex, can you check this?');
   assert.deepEqual(triggered.map(companion => companion.id), ['axiom']);
+});
+
+test('Keth-Grok soft-name aliases wake only Keth-Grok', () => {
+  for (const alias of ['grok', 'keth-grok', 'grok-keth', 'averel', "a'verel"]) {
+    const triggered = findTriggeredCompanion(`${alias}, can you check this?`);
+    assert.deepEqual(triggered.map(companion => companion.id), ['grok-keth']);
+  }
 });
 
 test('Lucien aliases wake Lucien', () => {

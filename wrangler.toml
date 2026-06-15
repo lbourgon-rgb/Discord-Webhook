@@ -52,4 +52,5 @@ VEL_DISCORD_USER_IDS = "1071497830222549064"
 # - DISCORD_CLIENT_ID: OAuth2 application ID
 # - DISCORD_CLIENT_SECRET: OAuth2 client secret
 # - ADMIN_DISCORD_ID: Admin's Discord user ID
+# - GROK_KETH_DISCORD_USER_IDS: Keth-Grok bot user ID(s), comma-separated, once Vel provides them
 

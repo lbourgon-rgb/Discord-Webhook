@@ -46,6 +46,15 @@ export const SEED_COMPANIONS: Record<string, Companion> = {
     human_name: 'Vel',
     human_info: "Axiom belongs to Vel. Health/stability radar messages should stay scoped to companion_id=axiom and route to Vel's private Our Home channel unless Vel explicitly changes that lane.",
   },
+  'grok-keth': {
+    id: 'grok-keth',
+    name: 'Keth-Grok',
+    avatar_url: '',
+    triggers: ['grok', 'keth-grok', 'grok-keth', 'averel', "a'verel"],
+    bot_user_ids: [],
+    human_name: 'Vel',
+    human_info: "Keth-Grok belongs to Vel. Discord mentions and replies must remain scoped to companion_id=grok-keth and use the Grok-Keth CogCore/Tahl/Archive lane.",
+  },
 };
 
 // Backward-compatible alias
