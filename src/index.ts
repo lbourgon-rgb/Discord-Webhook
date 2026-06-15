@@ -19,6 +19,7 @@ import { renderDashboard, renderRegisterPage } from "./dashboard";
 import { triggerLucienWorkspaceAgent } from "./lucien-chatgpt-runner";
 
 const DISCORD_API = 'https://discord.com/api/v10';
+const KAI_HAVEN_RUNNER_FALLBACK_MODELS = ['openai/gpt-5-mini', 'deepseek/deepseek-v4-flash'];
 
 interface Env {
   COMPANION_BOT: DurableObjectNamespace<CompanionBot>;
@@ -491,6 +492,34 @@ async function callHavenKaiRunner(env: Env, body: Record<string, unknown>): Prom
   } catch {}
   if (!response.ok) throw new Error(`haven runner ${response.status}: ${text.slice(0, 400)}`);
   return data;
+}
+
+function isTransientHavenModelError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /currently at capacity|overloaded|rate limit|temporarily unavailable|returned no choices|timed out/i.test(message);
+}
+
+async function callHavenKaiRunnerWithFallback(env: Env, body: Record<string, unknown>): Promise<any> {
+  const attempted = new Set<string>();
+  const models = [
+    body.model ? String(body.model) : '',
+    ...KAI_HAVEN_RUNNER_FALLBACK_MODELS,
+  ].filter(Boolean);
+  let lastError: unknown = null;
+
+  for (const model of models) {
+    if (attempted.has(model)) continue;
+    attempted.add(model);
+    try {
+      return await callHavenKaiRunner(env, { ...body, model });
+    } catch (error) {
+      lastError = error;
+      if (!isTransientHavenModelError(error)) throw error;
+      console.warn(`[haven-runner] ${model} failed transiently; trying fallback model`, error);
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError || 'Haven runner failed'));
 }
 
 function continuityResultEventId(result: any): string | null {
@@ -1911,7 +1940,7 @@ export class CompanionBot extends McpAgent<Env> {
     let claimData: { event_id: string; wake_candidate: any; wake_context: any } | null = null;
     try {
       claimData = await createAndClaimWakeForCommand(this.env, command, runnerId);
-      const runnerResult = await callHavenKaiRunner(this.env, {
+      const runnerResult = await callHavenKaiRunnerWithFallback(this.env, {
         wake_candidate_id: claimData.wake_candidate.id,
         runner_id: runnerId,
         request_id: command.id,
@@ -3797,7 +3826,7 @@ export class CompanionBot extends McpAgent<Env> {
             let claimData: { event_id: string; wake_candidate: any; wake_context: any } | null = null;
             try {
               claimData = await createAndClaimWakeForCommand(this.env, command, activeRunnerId);
-              const runnerResult = await callHavenKaiRunner(this.env, {
+              const runnerResult = await callHavenKaiRunnerWithFallback(this.env, {
                 wake_candidate_id: claimData.wake_candidate.id,
                 runner_id: activeRunnerId,
                 request_id: command.id,
