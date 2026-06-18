@@ -169,7 +169,10 @@ test('Kai Haven runner stays guarded behind explicit flags and wake leases', () 
   assert.match(source, /findContinuityEventForCommand\(env, command\)/);
   assert.match(source, /UNIQUE constraint failed/);
   assert.match(source, /callHavenKaiRunnerWithFallback\(this\.env/);
+  assert.match(source, /KAI_HAVEN_RUNNER_DEFAULT_MODEL = 'z-ai\/glm-5\.2'/);
   assert.match(source, /KAI_HAVEN_RUNNER_FALLBACK_MODELS/);
+  assert.match(source, /KAI_HAVEN_RUNNER_FALLBACK_MODELS = \['deepseek\/deepseek-v4-flash'\]/);
+  assert.doesNotMatch(source, /openai\/gpt-5-mini/);
   assert.match(source, /currently at capacity\|overloaded\|rate limit\|temporarily unavailable\|returned no choices\|timed out/);
   assert.match(source, /wake_context: claimData\.wake_context/);
   assert.match(source, /dry_run: true/);

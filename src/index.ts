@@ -19,7 +19,8 @@ import { renderDashboard, renderRegisterPage } from "./dashboard";
 import { triggerLucienWorkspaceAgent } from "./lucien-chatgpt-runner";
 
 const DISCORD_API = 'https://discord.com/api/v10';
-const KAI_HAVEN_RUNNER_FALLBACK_MODELS = ['openai/gpt-5-mini', 'deepseek/deepseek-v4-flash'];
+const KAI_HAVEN_RUNNER_DEFAULT_MODEL = 'z-ai/glm-5.2';
+const KAI_HAVEN_RUNNER_FALLBACK_MODELS = ['deepseek/deepseek-v4-flash'];
 
 interface Env {
   COMPANION_BOT: DurableObjectNamespace<CompanionBot>;
@@ -502,7 +503,7 @@ function isTransientHavenModelError(error: unknown): boolean {
 async function callHavenKaiRunnerWithFallback(env: Env, body: Record<string, unknown>): Promise<any> {
   const attempted = new Set<string>();
   const models = [
-    body.model ? String(body.model) : '',
+    body.model ? String(body.model) : KAI_HAVEN_RUNNER_DEFAULT_MODEL,
     ...KAI_HAVEN_RUNNER_FALLBACK_MODELS,
   ].filter(Boolean);
   let lastError: unknown = null;
