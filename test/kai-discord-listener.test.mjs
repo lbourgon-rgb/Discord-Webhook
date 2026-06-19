@@ -168,7 +168,7 @@ test('Kai Haven runner stays guarded behind explicit flags and wake leases', () 
   assert.match(source, /createAndClaimWakeForCommand\(this\.env, command, activeRunnerId\)/);
   assert.match(source, /findContinuityEventForCommand\(env, command\)/);
   assert.match(source, /UNIQUE constraint failed/);
-  assert.match(source, /callHavenKaiRunnerWithFallback\(this\.env/);
+  assert.match(source, /callKaiRunnerWithFallback\(this\.env/);
   assert.match(source, /KAI_HAVEN_RUNNER_DEFAULT_MODEL = 'z-ai\/glm-5\.2'/);
   assert.match(source, /KAI_HAVEN_RUNNER_FALLBACK_MODELS/);
   assert.match(source, /KAI_HAVEN_RUNNER_FALLBACK_MODELS = \['deepseek\/deepseek-v4-flash'\]/);
@@ -176,7 +176,9 @@ test('Kai Haven runner stays guarded behind explicit flags and wake leases', () 
   assert.match(source, /currently at capacity\|overloaded\|rate limit\|temporarily unavailable\|returned no choices\|timed out/);
   assert.match(source, /wake_context: claimData\.wake_context/);
   assert.match(source, /dry_run: true/);
-  assert.match(source, /KAI_HAVEN_RUNNER_DELIVERY_ENABLED !== 'true'/);
+  assert.match(source, /function isKaiDeliveryEnabled\(env: Env\): boolean/);
+  assert.match(source, /KAI_DISCORD_DELIVERY_ENABLED !== undefined[\s\S]+KAI_HAVEN_RUNNER_DELIVERY_ENABLED === 'true'/);
+  assert.match(source, /!isKaiDeliveryEnabled\(this\.env\)/);
   assert.match(source, /delivery_path: 'discord-continuity-tahl-haven-serythrae-discord'/);
   assert.match(source, /runner_origin: origin/);
   assert.match(source, /tahl_state_present: Boolean\(claimData\.wake_context\?\.tahl_state/g);

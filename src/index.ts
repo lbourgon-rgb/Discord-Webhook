@@ -32,6 +32,7 @@ interface Env {
   CONTINUITY_API_KEY?: string;
   CONTINUITY?: Fetcher;
   HAVEN?: Fetcher;
+  NEXUS?: Fetcher;
   HAVEN_RUNNER_URL?: string;
   HAVEN_RUNNER_API_KEY?: string;
   KAI_HAVEN_RUNNER_ENABLED?: string;
@@ -546,15 +547,16 @@ async function callHavenKaiRunner(env: Env, body: Record<string, unknown>): Prom
 }
 
 async function callNexusKaiRunner(env: Env, body: Record<string, unknown>): Promise<any> {
-  const base = (env.KAI_NEXUS_URL || '').replace(/\/+$/, '');
-  if (!base) throw new Error('KAI_NEXUS_URL is not configured');
+  const base = (env.KAI_NEXUS_URL || 'https://nexus.internal').replace(/\/+$/, '');
+  if (!env.NEXUS && !env.KAI_NEXUS_URL) throw new Error('KAI_NEXUS_URL or NEXUS service binding is not configured');
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (env.HAVEN_RUNNER_API_KEY) headers.Authorization = `Bearer ${env.HAVEN_RUNNER_API_KEY}`;
-  const response = await fetch(`${base}/api/kaisoryth/run`, {
+  const request = new Request(`${base}/api/kaisoryth/run`, {
     method: 'POST',
     headers,
     body: JSON.stringify(body),
   });
+  const response = env.NEXUS ? await env.NEXUS.fetch(request) : await fetch(request);
   const text = await response.text();
   let data: any = text;
   try {
@@ -3033,7 +3035,7 @@ export class CompanionBot extends McpAgent<Env> {
           delivery_enabled: isKaiDeliveryEnabled(this.env),
           autorespond_enabled: isKaiAutorespondEnabled(this.env),
           runner_route: this.env.KAI_RUNNER_ROUTE || 'haven',
-          nexus_configured: Boolean(this.env.KAI_NEXUS_URL),
+          nexus_configured: Boolean(this.env.KAI_NEXUS_URL || this.env.NEXUS),
           guild_configured: Boolean(this.env.KAI_GUILD_ID),
           category_configured: Boolean(this.env.KAI_CATEGORY_ID),
           mention_user_configured: Boolean(this.env.KAI_MENTION_USER_ID || this.env.KAI_DISCORD_USER_IDS),

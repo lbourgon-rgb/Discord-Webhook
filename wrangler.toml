@@ -18,6 +18,10 @@ service = "continuity-worker"
 binding = "HAVEN"
 service = "haven"
 
+[[services]]
+binding = "NEXUS"
+service = "nexus-gateway"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["CompanionBot"]
