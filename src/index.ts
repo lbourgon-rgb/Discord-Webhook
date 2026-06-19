@@ -547,8 +547,8 @@ async function callHavenKaiRunner(env: Env, body: Record<string, unknown>): Prom
 }
 
 async function callNexusKaiRunner(env: Env, body: Record<string, unknown>): Promise<any> {
-  const base = (env.KAI_NEXUS_URL || 'https://nexus.internal').replace(/\/+$/, '');
   if (!env.NEXUS && !env.KAI_NEXUS_URL) throw new Error('KAI_NEXUS_URL or NEXUS service binding is not configured');
+  const base = (env.NEXUS ? 'https://nexus.internal' : env.KAI_NEXUS_URL || 'https://nexus.internal').replace(/\/+$/, '');
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (env.HAVEN_RUNNER_API_KEY) headers.Authorization = `Bearer ${env.HAVEN_RUNNER_API_KEY}`;
   const request = new Request(`${base}/api/kaisoryth/run`, {
