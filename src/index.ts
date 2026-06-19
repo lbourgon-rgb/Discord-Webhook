@@ -21,6 +21,7 @@ import { triggerLucienWorkspaceAgent } from "./lucien-chatgpt-runner";
 const DISCORD_API = 'https://discord.com/api/v10';
 const KAI_HAVEN_RUNNER_DEFAULT_MODEL = 'z-ai/glm-5.2';
 const KAI_HAVEN_RUNNER_FALLBACK_MODELS = ['deepseek/deepseek-v4-flash'];
+const DEFAULT_KAI_DISCORD_USER_ID = '1447789482253484175';
 
 interface Env {
   COMPANION_BOT: DurableObjectNamespace<CompanionBot>;
@@ -36,6 +37,18 @@ interface Env {
   KAI_HAVEN_RUNNER_ENABLED?: string;
   KAI_HAVEN_RUNNER_DELIVERY_ENABLED?: string;
   KAI_HAVEN_RUNNER_AUTORESPOND?: string;
+  KAI_GUILD_ID?: string;
+  KAI_CATEGORY_ID?: string;
+  KAI_MENTION_USER_ID?: string;
+  KAI_ACCESSIBLE_CHANNEL_IDS?: string;
+  KAI_LISTEN_CHANNEL_IDS?: string;
+  KAI_DISCORD_LISTENER_ENABLED?: string;
+  KAI_DISCORD_DELIVERY_ENABLED?: string;
+  KAI_DISCORD_AUTORESPOND?: string;
+  KAI_RUNNER_ROUTE?: string;
+  KAI_NEXUS_URL?: string;
+  KAI_DEFAULT_MODEL?: string;
+  KAI_BACKUP_MODEL?: string;
   LUCIEN_CHATGPT_RUNNER_ENABLED?: string;
   LUCIEN_CHATGPT_AUTORESPOND?: string;
   LUCIEN_CHATGPT_DELIVERY_ENABLED?: string;
@@ -137,9 +150,46 @@ function splitIds(value?: string): string[] {
 }
 
 function getKaiDiscordMentionIds(env: Env): string[] {
-  const configured = splitIds(env.KAI_DISCORD_USER_IDS || '1447789482253484175');
+  const configured = splitIds(env.KAI_MENTION_USER_ID || env.KAI_DISCORD_USER_IDS || DEFAULT_KAI_DISCORD_USER_ID);
   const clientId = env.DISCORD_CLIENT_ID && /^\d+$/.test(env.DISCORD_CLIENT_ID) ? [env.DISCORD_CLIENT_ID] : [];
   return [...new Set([...configured, ...clientId])];
+}
+
+function isKaiListenerEnabled(env: Env): boolean {
+  return env.KAI_DISCORD_LISTENER_ENABLED !== undefined
+    ? env.KAI_DISCORD_LISTENER_ENABLED === 'true'
+    : env.KAI_HAVEN_RUNNER_ENABLED === 'true';
+}
+
+function isKaiDeliveryEnabled(env: Env): boolean {
+  return env.KAI_DISCORD_DELIVERY_ENABLED !== undefined
+    ? env.KAI_DISCORD_DELIVERY_ENABLED === 'true'
+    : env.KAI_HAVEN_RUNNER_DELIVERY_ENABLED === 'true';
+}
+
+function isKaiAutorespondEnabled(env: Env): boolean {
+  return env.KAI_DISCORD_AUTORESPOND !== undefined
+    ? env.KAI_DISCORD_AUTORESPOND === 'true'
+    : env.KAI_HAVEN_RUNNER_AUTORESPOND === 'true';
+}
+
+function getKaiListenChannelIds(env: Env): string[] {
+  return splitIds(env.KAI_LISTEN_CHANNEL_IDS);
+}
+
+function getKaiAccessibleChannelIds(env: Env): string[] {
+  const configured = splitIds(env.KAI_ACCESSIBLE_CHANNEL_IDS);
+  return configured.length ? configured : splitIds(env.WATCH_CHANNELS);
+}
+
+function isKaiAccessibleChannel(env: Env, channelId: string): boolean {
+  const accessible = getKaiAccessibleChannelIds(env);
+  return accessible.length === 0 || accessible.includes(channelId);
+}
+
+function isKaiListenChannel(env: Env, channelId: string): boolean {
+  const listen = getKaiListenChannelIds(env);
+  return listen.length > 0 && listen.includes(channelId) && isKaiAccessibleChannel(env, channelId);
 }
 
 function companionSeedBotUserIds(companion: string | Companion): string[] {
@@ -495,16 +545,40 @@ async function callHavenKaiRunner(env: Env, body: Record<string, unknown>): Prom
   return data;
 }
 
-function isTransientHavenModelError(error: unknown): boolean {
+async function callNexusKaiRunner(env: Env, body: Record<string, unknown>): Promise<any> {
+  const base = (env.KAI_NEXUS_URL || '').replace(/\/+$/, '');
+  if (!base) throw new Error('KAI_NEXUS_URL is not configured');
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (env.HAVEN_RUNNER_API_KEY) headers.Authorization = `Bearer ${env.HAVEN_RUNNER_API_KEY}`;
+  const response = await fetch(`${base}/api/kaisoryth/runner-preview`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  let data: any = text;
+  try {
+    data = JSON.parse(text);
+  } catch {}
+  if (!response.ok) throw new Error(`nexus runner ${response.status}: ${text.slice(0, 400)}`);
+  return data;
+}
+
+async function callKaiRunner(env: Env, body: Record<string, unknown>): Promise<any> {
+  if (env.KAI_RUNNER_ROUTE === 'nexus') return callNexusKaiRunner(env, body);
+  return callHavenKaiRunner(env, body);
+}
+
+function isTransientKaiRunnerModelError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /currently at capacity|overloaded|rate limit|temporarily unavailable|returned no choices|timed out/i.test(message);
 }
 
-async function callHavenKaiRunnerWithFallback(env: Env, body: Record<string, unknown>): Promise<any> {
+async function callKaiRunnerWithFallback(env: Env, body: Record<string, unknown>): Promise<any> {
   const attempted = new Set<string>();
   const models = [
-    body.model ? String(body.model) : KAI_HAVEN_RUNNER_DEFAULT_MODEL,
-    ...KAI_HAVEN_RUNNER_FALLBACK_MODELS,
+    body.model ? String(body.model) : (env.KAI_DEFAULT_MODEL || KAI_HAVEN_RUNNER_DEFAULT_MODEL),
+    ...(env.KAI_BACKUP_MODEL ? [env.KAI_BACKUP_MODEL] : KAI_HAVEN_RUNNER_FALLBACK_MODELS),
   ].filter(Boolean);
   let lastError: unknown = null;
 
@@ -512,15 +586,15 @@ async function callHavenKaiRunnerWithFallback(env: Env, body: Record<string, unk
     if (attempted.has(model)) continue;
     attempted.add(model);
     try {
-      return await callHavenKaiRunner(env, { ...body, model });
+      return await callKaiRunner(env, { ...body, model });
     } catch (error) {
       lastError = error;
-      if (!isTransientHavenModelError(error)) throw error;
-      console.warn(`[haven-runner] ${model} failed transiently; trying fallback model`, error);
+      if (!isTransientKaiRunnerModelError(error)) throw error;
+      console.warn(`[kai-runner] ${model} failed transiently; trying fallback model`, error);
     }
   }
 
-  throw lastError instanceof Error ? lastError : new Error(String(lastError || 'Haven runner failed'));
+  throw lastError instanceof Error ? lastError : new Error(String(lastError || 'Kai runner failed'));
 }
 
 function continuityResultEventId(result: any): string | null {
@@ -972,12 +1046,16 @@ export class CompanionBot extends McpAgent<Env> {
 
   private seedBootstrapMonitors() {
     const now = Date.now();
-    const channels = (this.env.WATCH_CHANNELS || '').split(',').map(s => s.trim()).filter(Boolean);
+    const kaiListenChannels = getKaiListenChannelIds(this.env);
+    const channels = kaiListenChannels.length
+      ? kaiListenChannels.filter(channelId => isKaiAccessibleChannel(this.env, channelId))
+      : (this.env.WATCH_CHANNELS || '').split(',').map(s => s.trim()).filter(Boolean);
+    const addedBy = kaiListenChannels.length ? 'KAI_LISTEN_CHANNEL_IDS' : 'WATCH_CHANNELS';
     for (const channelId of channels) {
       this.ctx.storage.sql.exec(
         `INSERT OR IGNORE INTO discord_monitors (id, channel_id, label, tier, enabled, respond_enabled, response_mode, last_checked, cooldown_ms, last_responded, added_by, added_at)
-         VALUES (?, ?, ?, 'normal', 1, 1, 'filtered', 0, 300000, 0, 'WATCH_CHANNELS', ?)`,
-        `monitor:${channelId}`, channelId, channelId, now
+         VALUES (?, ?, ?, 'normal', 1, 1, 'filtered', 0, 300000, 0, ?, ?)`,
+        `monitor:${channelId}`, channelId, channelId, addedBy, now
       );
     }
   }
@@ -1917,10 +1995,10 @@ export class CompanionBot extends McpAgent<Env> {
 
   private async runHavenRunnerFromDashboard(requestId: string, deliver: boolean, origin: 'dashboard' | 'autorespond' = 'dashboard'): Promise<Response> {
     this.ensureTable();
-    if (this.env.KAI_HAVEN_RUNNER_ENABLED !== 'true') {
+    if (!isKaiListenerEnabled(this.env)) {
       return new Response(JSON.stringify({
         ok: false,
-        error: 'Haven Kai runner is installed but disabled. Set KAI_HAVEN_RUNNER_ENABLED=true for supervised testing.',
+        error: 'Kai runner/listener is installed but disabled. Set KAI_DISCORD_LISTENER_ENABLED=true for supervised testing.',
       }), { status: 409, headers: { 'Content-Type': 'application/json' } });
     }
     const command = this.getPending().find(cmd => cmd.id === requestId);
@@ -1941,7 +2019,7 @@ export class CompanionBot extends McpAgent<Env> {
     let claimData: { event_id: string; wake_candidate: any; wake_context: any } | null = null;
     try {
       claimData = await createAndClaimWakeForCommand(this.env, command, runnerId);
-      const runnerResult = await callHavenKaiRunnerWithFallback(this.env, {
+      const runnerResult = await callKaiRunnerWithFallback(this.env, {
         wake_candidate_id: claimData.wake_candidate.id,
         runner_id: runnerId,
         request_id: command.id,
@@ -1984,12 +2062,12 @@ export class CompanionBot extends McpAgent<Env> {
           response: generatedResponse,
         }, null, 2), { headers: { 'Content-Type': 'application/json' } });
       }
-      if (this.env.KAI_HAVEN_RUNNER_DELIVERY_ENABLED !== 'true') {
+      if (!isKaiDeliveryEnabled(this.env)) {
         await releaseWakeCandidate(this.env, claimData.wake_candidate.id, runnerId, 'dashboard delivery requested but disabled').catch(() => null);
         return new Response(JSON.stringify({
           ok: false,
           mode: 'delivery_disabled',
-          error: 'Haven generated a response, but Discord delivery is disabled. Set KAI_HAVEN_RUNNER_DELIVERY_ENABLED=true for the private-channel smoke test.',
+          error: 'Kai generated a response, but Discord delivery is disabled. Set KAI_DISCORD_DELIVERY_ENABLED=true for the private-channel smoke test.',
           request_id: requestId,
           continuity_event_id: claimData.event_id,
           wake_candidate_id: claimData.wake_candidate.id,
@@ -2897,6 +2975,18 @@ export class CompanionBot extends McpAgent<Env> {
         pending_count: pending.length,
         companion_count: companions.length,
         monitor_count: monitors.length,
+        kai: {
+          listener_enabled: isKaiListenerEnabled(this.env),
+          delivery_enabled: isKaiDeliveryEnabled(this.env),
+          autorespond_enabled: isKaiAutorespondEnabled(this.env),
+          runner_route: this.env.KAI_RUNNER_ROUTE || 'haven',
+          nexus_configured: Boolean(this.env.KAI_NEXUS_URL),
+          guild_configured: Boolean(this.env.KAI_GUILD_ID),
+          category_configured: Boolean(this.env.KAI_CATEGORY_ID),
+          mention_user_configured: Boolean(this.env.KAI_MENTION_USER_ID || this.env.KAI_DISCORD_USER_IDS),
+          listen_channel_count: getKaiListenChannelIds(this.env).length,
+          accessible_channel_count: getKaiAccessibleChannelIds(this.env).length,
+        },
         watch_channels: channelDetails,
         monitors,
         servers,
@@ -3126,9 +3216,10 @@ export class CompanionBot extends McpAgent<Env> {
 
           if (
             !isWebhook
-            && this.env.KAI_HAVEN_RUNNER_ENABLED === 'true'
-            && this.env.KAI_HAVEN_RUNNER_DELIVERY_ENABLED === 'true'
-            && this.env.KAI_HAVEN_RUNNER_AUTORESPOND === 'true'
+            && isKaiListenerEnabled(this.env)
+            && isKaiDeliveryEnabled(this.env)
+            && isKaiAutorespondEnabled(this.env)
+            && isKaiListenChannel(this.env, channelId)
             && isVelDiscordAuthor(this.env, msg.author?.id)
           ) {
             const mentionIds = normalizeMentionIds(msg.mentions);
@@ -3584,7 +3675,7 @@ export class CompanionBot extends McpAgent<Env> {
         response: z.string().optional().describe("(respond) The companion's response message"),
         dismissalReason: z.string().optional().describe("(dismiss) Required explanation for why this pending message is not being answered"),
         runnerId: z.string().optional().describe("(run_with_haven) Runner lease owner id. Defaults to haven-runner:kai"),
-        deliver: z.boolean().optional().describe("(run_with_haven) Post Haven's returned response to Discord. Requires KAI_HAVEN_RUNNER_DELIVERY_ENABLED=true."),
+        deliver: z.boolean().optional().describe("(run_with_haven) Post Kai runner response to Discord. Requires KAI_DISCORD_DELIVERY_ENABLED=true."),
         model: z.string().optional().describe("(run_with_haven) Optional Haven model override"),
         provider: z.string().optional().describe("(run_with_haven) Optional Haven provider override"),
         webhookUrl: z.string().optional().describe("(respond) Discord webhook URL override"),
@@ -3800,8 +3891,8 @@ export class CompanionBot extends McpAgent<Env> {
           }
 
           case "run_with_haven": {
-            if (this.env.KAI_HAVEN_RUNNER_ENABLED !== 'true') {
-              return { content: [{ type: "text" as const, text: "Haven Kai runner is installed but disabled. Set KAI_HAVEN_RUNNER_ENABLED=true when ready for supervised testing." }] };
+            if (!isKaiListenerEnabled(this.env)) {
+              return { content: [{ type: "text" as const, text: "Kai runner/listener is installed but disabled. Set KAI_DISCORD_LISTENER_ENABLED=true when ready for supervised testing." }] };
             }
             if (!requestId) {
               return { content: [{ type: "text" as const, text: "requestId is required for 'run_with_haven' action" }] };
@@ -3827,7 +3918,7 @@ export class CompanionBot extends McpAgent<Env> {
             let claimData: { event_id: string; wake_candidate: any; wake_context: any } | null = null;
             try {
               claimData = await createAndClaimWakeForCommand(this.env, command, activeRunnerId);
-              const runnerResult = await callHavenKaiRunnerWithFallback(this.env, {
+              const runnerResult = await callKaiRunnerWithFallback(this.env, {
                 wake_candidate_id: claimData.wake_candidate.id,
                 runner_id: activeRunnerId,
                 request_id: command.id,
@@ -3870,9 +3961,9 @@ export class CompanionBot extends McpAgent<Env> {
                   response: generatedResponse,
                 }, null, 2) }] };
               }
-              if (this.env.KAI_HAVEN_RUNNER_DELIVERY_ENABLED !== 'true') {
+              if (!isKaiDeliveryEnabled(this.env)) {
                 await releaseWakeCandidate(this.env, claimData.wake_candidate.id, activeRunnerId, 'delivery requested but disabled').catch(() => null);
-                return { content: [{ type: "text" as const, text: `Haven generated a response, but delivery is disabled. Set KAI_HAVEN_RUNNER_DELIVERY_ENABLED=true for the Kai room smoke test.\n\n${generatedResponse}` }] };
+                return { content: [{ type: "text" as const, text: `Kai generated a response, but delivery is disabled. Set KAI_DISCORD_DELIVERY_ENABLED=true for the Kai room smoke test.\n\n${generatedResponse}` }] };
               }
 
               const companionRes = await stub.fetch(new Request(`https://internal/api/companions/${command.companion_id}`));
