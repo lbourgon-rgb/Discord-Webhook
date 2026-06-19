@@ -234,6 +234,11 @@ function isVelDiscordAuthor(env: Env, authorId?: string): boolean {
   return !!authorId && getVelDiscordUserIds(env).includes(authorId);
 }
 
+function discordAuthorNameForKai(env: Env, author: any): string {
+  if (isVelDiscordAuthor(env, author?.id)) return 'Vel';
+  return author?.global_name || author?.username || 'unknown';
+}
+
 function normalizeMentionIds(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value
@@ -674,6 +679,7 @@ async function createAndClaimWakeForCommand(env: Env, command: PendingCommand, r
           ...(command.engagement ? engagementDebug(command.engagement) : {}),
           mention_ids: command.mention_ids || [],
           referenced_author_id: command.referenced_author_id || null,
+          attachments: command.attachments || [],
         },
         raw: command,
         pre_response_required: true,
@@ -774,6 +780,33 @@ function discordAttachmentMetadata(attachments: unknown): Array<Record<string, u
       width: typeof item.width === 'number' ? item.width : undefined,
       height: typeof item.height === 'number' ? item.height : undefined,
     }));
+}
+
+function isImageAttachmentMetadata(attachment: Record<string, unknown>): boolean {
+  const contentType = typeof attachment.content_type === 'string' ? attachment.content_type.toLowerCase() : '';
+  const filename = typeof attachment.filename === 'string' ? attachment.filename.toLowerCase() : '';
+  const url = typeof attachment.url === 'string' ? attachment.url.toLowerCase() : '';
+  return contentType.startsWith('image/')
+    || /\.(png|jpe?g|webp|gif|avif)(\?|$)/i.test(filename)
+    || /\.(png|jpe?g|webp|gif|avif)(\?|$)/i.test(url);
+}
+
+function messageHasUsableContent(message: any): boolean {
+  return Boolean(String(message?.content || '').trim()) || discordAttachmentMetadata(message?.attachments).length > 0;
+}
+
+function mergeAttachmentMetadata(...groups: Array<Array<Record<string, unknown>>>): Array<Record<string, unknown>> {
+  const seen = new Set<string>();
+  const merged: Array<Record<string, unknown>> = [];
+  for (const group of groups) {
+    for (const attachment of group) {
+      const key = String(attachment.id || attachment.url || attachment.proxy_url || JSON.stringify(attachment));
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(attachment);
+    }
+  }
+  return merged;
 }
 
 function isRequiredVelHardTag(cmd: Pick<PendingCommand, 'priority' | 'trigger_reason' | 'engagement'>): boolean {
@@ -1380,6 +1413,7 @@ export class CompanionBot extends McpAgent<Env> {
     engagement?: EngagementDecision;
     mentionIds?: string[];
     referencedAuthorId?: string;
+    attachments?: Array<Record<string, unknown>>;
     createdAt?: string;
     skipContinuity?: boolean;
   }) {
@@ -1422,6 +1456,7 @@ export class CompanionBot extends McpAgent<Env> {
           ...(debug?.engagement ? engagementDebug(debug.engagement) : {}),
           mention_ids: debug?.mentionIds || [],
           referenced_author_id: debug?.referencedAuthorId || null,
+          attachments: debug?.attachments || [],
         },
         pre_response_required: type === 'triggered' || type === 'queued',
       }).catch((err) => console.warn('[continuity] discord event failed', err));
@@ -1976,15 +2011,55 @@ export class CompanionBot extends McpAgent<Env> {
 
   private formatRecentContext(messages: any[]): string {
     return (Array.isArray(messages) ? messages : [])
-      .filter(message => message?.content)
+      .filter(message => messageHasUsableContent(message))
       .slice(-20)
       .map(message => {
         const stamp = String(message.timestamp || '').slice(11, 16) || '--:--';
-        const name = String(message.author?.global_name || message.author?.username || message.author || 'unknown');
+        const name = String(discordAuthorNameForKai(this.env, message.author) || message.author || 'unknown');
         const text = String(message.content || '').replace(/\s+/g, ' ').trim().slice(0, 220);
-        return `[${stamp}] ${name}: ${text}`;
+        const attachments = discordAttachmentMetadata(message.attachments)
+          .map(attachment => `[attachment: ${String(attachment.filename || attachment.id || 'file')}${attachment.content_type ? ` ${attachment.content_type}` : ''}]`)
+          .join(' ');
+        return `[${stamp}] ${name}: ${[text, attachments].filter(Boolean).join(' ')}`;
       })
       .join('\n');
+  }
+
+  private async recentImageAttachmentsBefore(channelId: string, msg: any, windowMs = 20 * 60 * 1000): Promise<Array<Record<string, unknown>>> {
+    const authorId = String(msg?.author?.id || '');
+    if (!channelId || !authorId || !msg?.id) return [];
+    const currentMs = Date.parse(msg.timestamp || '') || Date.now();
+    try {
+      const priorMessages = await discordRequest(this.env, `/channels/${channelId}/messages?before=${encodeURIComponent(msg.id)}&limit=10`);
+      if (!Array.isArray(priorMessages)) return [];
+      const attachments: Array<Record<string, unknown>> = [];
+      for (const prior of priorMessages) {
+        if (String(prior?.author?.id || '') !== authorId) continue;
+        const priorMs = Date.parse(prior?.timestamp || '') || 0;
+        if (!priorMs || Math.abs(currentMs - priorMs) > windowMs) continue;
+        for (const attachment of discordAttachmentMetadata(prior?.attachments)) {
+          if (!isImageAttachmentMetadata(attachment)) continue;
+          attachments.push({
+            ...attachment,
+            source_message_id: prior.id,
+            source: 'recent-discord-context',
+          });
+        }
+      }
+      return attachments.slice(-4);
+    } catch (error) {
+      console.warn(`[kai-vision] failed to fetch recent image attachments before ${msg.id}`, error);
+      return [];
+    }
+  }
+
+  private async kaiAttachmentsForMessage(channelId: string, msg: any): Promise<Array<Record<string, unknown>>> {
+    const current = discordAttachmentMetadata(msg?.attachments);
+    const text = String(msg?.content || '');
+    const shouldLookBack = current.filter(isImageAttachmentMetadata).length === 0
+      && /\b(image|img|pic|picture|photo|attachment|see this|look at this)\b/i.test(text);
+    if (!shouldLookBack) return current;
+    return mergeAttachmentMetadata(current, await this.recentImageAttachmentsBefore(channelId, msg));
   }
 
   private cleanStale() {
@@ -3363,8 +3438,9 @@ export class CompanionBot extends McpAgent<Env> {
 
           // Skip non-webhook bot messages (system messages from the bot itself)
           if (isBot && !isWebhook) continue;
-          // Skip empty messages
-          if (!msg.content) continue;
+          // Skip events with neither text nor attachment metadata.
+          if (!messageHasUsableContent(msg)) continue;
+          msg.content = String(msg.content || '');
 
           if (
             !isWebhook
@@ -3377,8 +3453,9 @@ export class CompanionBot extends McpAgent<Env> {
             if (hardKaiMention) {
               const companion = this.getCompanionById('kai');
               if (!companion) continue;
-              const authorName = msg.author?.global_name || msg.author?.username || 'unknown';
+              const authorName = discordAuthorNameForKai(this.env, msg.author);
               const recentContext = this.formatRecentContext(messages);
+              const attachments = await this.kaiAttachmentsForMessage(channelId, msg);
               const engagement: EngagementDecision = {
                 disposition: 'respond',
                 trigger_reason: 'digital-haven-public-hard-tag',
@@ -3407,12 +3484,12 @@ export class CompanionBot extends McpAgent<Env> {
                 mention_ids: mentionIds,
                 response_mode: 'mention',
                 recent_context: recentContext,
-                attachments: discordAttachmentMetadata(msg.attachments),
+                attachments,
                 engagement,
                 timestamp: Date.parse(msg.timestamp) || Date.now(),
               };
               this.storeCommand(command);
-              const activityDebug = { authorId: msg.author?.id, engagement, mentionIds, createdAt: msg.timestamp };
+              const activityDebug = { authorId: msg.author?.id, engagement, mentionIds, attachments, createdAt: msg.timestamp };
               this.logActivity(companion.id, 'queued', channelId, msg.content, authorName, msg.id, undefined, activityDebug);
               totalStored++;
               try {
@@ -3445,8 +3522,9 @@ export class CompanionBot extends McpAgent<Env> {
             if (hardKaiMention || softKaiMention || directReplyToKai) {
               const companion = this.getCompanionById('kai');
               if (!companion) continue;
-              const authorName = msg.author?.global_name || msg.author?.username || 'unknown';
+              const authorName = discordAuthorNameForKai(this.env, msg.author);
               const recentContext = this.formatRecentContext(messages);
+              const attachments = await this.kaiAttachmentsForMessage(channelId, msg);
               const engagement: EngagementDecision = {
                 disposition: 'respond',
                 trigger_reason: hardKaiMention ? 'direct-haven-hard-mention' : (directReplyToKai ? 'direct-haven-reply' : 'direct-haven-soft-name'),
@@ -3476,12 +3554,12 @@ export class CompanionBot extends McpAgent<Env> {
                 referenced_author_id: referencedAuthorId,
                 response_mode: 'open',
                 recent_context: recentContext,
-                attachments: discordAttachmentMetadata(msg.attachments),
+                attachments,
                 engagement,
                 timestamp: Date.parse(msg.timestamp) || Date.now(),
               };
               this.storeCommand(command);
-              const activityDebug = { authorId: msg.author?.id, engagement, mentionIds, referencedAuthorId, createdAt: msg.timestamp };
+              const activityDebug = { authorId: msg.author?.id, engagement, mentionIds, referencedAuthorId, attachments, createdAt: msg.timestamp };
               this.logActivity(companion.id, 'queued', channelId, msg.content, authorName, msg.id, undefined, activityDebug);
               totalStored++;
               try {
