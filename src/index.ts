@@ -550,7 +550,7 @@ async function callNexusKaiRunner(env: Env, body: Record<string, unknown>): Prom
   if (!base) throw new Error('KAI_NEXUS_URL is not configured');
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (env.HAVEN_RUNNER_API_KEY) headers.Authorization = `Bearer ${env.HAVEN_RUNNER_API_KEY}`;
-  const response = await fetch(`${base}/api/kaisoryth/runner-preview`, {
+  const response = await fetch(`${base}/api/kaisoryth/run`, {
     method: 'POST',
     headers,
     body: JSON.stringify(body),
@@ -717,6 +717,25 @@ interface PendingCommand {
   response_mode?: DiscordResponseMode;
   recent_context?: string;
   engagement?: EngagementDecision;
+}
+
+function kaiRunnerEnvelopeForCommand(command: PendingCommand): Record<string, unknown> {
+  return {
+    guild_id: undefined,
+    channel_id: command.channel_id,
+    message_id: command.message_id || command.id,
+    author_id: command.author?.id || command.author_id,
+    author_username: command.author?.username,
+    timestamp: new Date(command.timestamp).toISOString(),
+    content: command.content,
+    mentions: command.mention_ids || [],
+    attachments: [],
+    trigger: command.source === 'manual'
+      ? 'manual'
+      : command.priority === 'high' || command.mention_ids?.length
+        ? 'mention'
+        : 'listener',
+  };
 }
 
 function isRequiredVelHardTag(cmd: Pick<PendingCommand, 'priority' | 'trigger_reason' | 'engagement'>): boolean {
@@ -2020,6 +2039,7 @@ export class CompanionBot extends McpAgent<Env> {
     try {
       claimData = await createAndClaimWakeForCommand(this.env, command, runnerId);
       const runnerResult = await callKaiRunnerWithFallback(this.env, {
+        envelope: kaiRunnerEnvelopeForCommand(command),
         wake_candidate_id: claimData.wake_candidate.id,
         runner_id: runnerId,
         request_id: command.id,
@@ -2034,7 +2054,18 @@ export class CompanionBot extends McpAgent<Env> {
         dry_run: true,
       });
       const generatedResponse = String(runnerResult.response || '').trim();
-      if (!generatedResponse) throw new Error('Haven runner returned an empty response');
+      if (!generatedResponse && this.env.KAI_RUNNER_ROUTE === 'nexus' && runnerResult?.generated === false) {
+        await releaseWakeCandidate(this.env, claimData.wake_candidate.id, runnerId, 'nexus dry-run contract; no text generation yet').catch(() => null);
+        return new Response(JSON.stringify({
+          ok: true,
+          mode: 'nexus_runner_dry_run',
+          request_id: requestId,
+          continuity_event_id: claimData.event_id,
+          wake_candidate_id: claimData.wake_candidate.id,
+          runner_result: runnerResult,
+        }, null, 2), { headers: { 'Content-Type': 'application/json' } });
+      }
+      if (!generatedResponse) throw new Error('Kai runner returned an empty response');
       const kaiDriftReason = kaiIdentityDriftReason(generatedResponse);
       const nonVelKaiReply = !isVelDiscordAuthor(this.env, command.author?.id || command.author_id);
       const unsafeReason = nonVelKaiReply ? nonVelUnsafeResponseReason(generatedResponse) : null;
@@ -3919,6 +3950,7 @@ export class CompanionBot extends McpAgent<Env> {
             try {
               claimData = await createAndClaimWakeForCommand(this.env, command, activeRunnerId);
               const runnerResult = await callKaiRunnerWithFallback(this.env, {
+                envelope: kaiRunnerEnvelopeForCommand(command),
                 wake_candidate_id: claimData.wake_candidate.id,
                 runner_id: activeRunnerId,
                 request_id: command.id,
@@ -3936,8 +3968,19 @@ export class CompanionBot extends McpAgent<Env> {
               });
 
               const generatedResponse = String(runnerResult.response || '').trim();
+              if (!generatedResponse && this.env.KAI_RUNNER_ROUTE === 'nexus' && runnerResult?.generated === false) {
+                await releaseWakeCandidate(this.env, claimData.wake_candidate.id, activeRunnerId, 'nexus dry-run contract; no text generation yet').catch(() => null);
+                return { content: [{ type: "text" as const, text: JSON.stringify({
+                  ok: true,
+                  mode: 'nexus_runner_dry_run',
+                  requestId,
+                  continuity_event_id: claimData.event_id,
+                  wake_candidate_id: claimData.wake_candidate.id,
+                  runner_result: runnerResult,
+                }, null, 2) }] };
+              }
               if (!generatedResponse) {
-                throw new Error('Haven runner returned an empty response');
+                throw new Error('Kai runner returned an empty response');
               }
               const kaiDriftReason = kaiIdentityDriftReason(generatedResponse);
               if (kaiDriftReason) {
