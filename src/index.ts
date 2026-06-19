@@ -716,6 +716,7 @@ interface PendingCommand {
   referenced_author_id?: string;
   response_mode?: DiscordResponseMode;
   recent_context?: string;
+  attachments?: Array<Record<string, unknown>>;
   engagement?: EngagementDecision;
 }
 
@@ -729,13 +730,29 @@ function kaiRunnerEnvelopeForCommand(command: PendingCommand): Record<string, un
     timestamp: new Date(command.timestamp).toISOString(),
     content: command.content,
     mentions: command.mention_ids || [],
-    attachments: [],
+    attachments: command.attachments || [],
     trigger: command.source === 'manual'
       ? 'manual'
       : command.priority === 'high' || command.mention_ids?.length
         ? 'mention'
         : 'listener',
   };
+}
+
+function discordAttachmentMetadata(attachments: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(attachments)) return [];
+  return attachments
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object' && !Array.isArray(item))
+    .map((item) => ({
+      id: typeof item.id === 'string' ? item.id : undefined,
+      filename: typeof item.filename === 'string' ? item.filename : undefined,
+      content_type: typeof item.content_type === 'string' ? item.content_type : undefined,
+      size: typeof item.size === 'number' ? item.size : undefined,
+      url: typeof item.url === 'string' ? item.url : undefined,
+      proxy_url: typeof item.proxy_url === 'string' ? item.proxy_url : undefined,
+      width: typeof item.width === 'number' ? item.width : undefined,
+      height: typeof item.height === 'number' ? item.height : undefined,
+    }));
 }
 
 function isRequiredVelHardTag(cmd: Pick<PendingCommand, 'priority' | 'trigger_reason' | 'engagement'>): boolean {
@@ -844,6 +861,7 @@ export class CompanionBot extends McpAgent<Env> {
       referenced_author_id TEXT,
       response_mode TEXT,
       recent_context TEXT,
+      attachments_json TEXT,
       engagement TEXT,
       timestamp INTEGER NOT NULL
     )`);
@@ -1018,6 +1036,7 @@ export class CompanionBot extends McpAgent<Env> {
       `ALTER TABLE pending_commands ADD COLUMN referenced_author_id TEXT`,
       `ALTER TABLE pending_commands ADD COLUMN response_mode TEXT`,
       `ALTER TABLE pending_commands ADD COLUMN recent_context TEXT`,
+      `ALTER TABLE pending_commands ADD COLUMN attachments_json TEXT`,
       `ALTER TABLE pending_commands ADD COLUMN engagement TEXT`,
     ]) {
       try {
@@ -1931,6 +1950,7 @@ export class CompanionBot extends McpAgent<Env> {
         referenced_author_id: row.referenced_author_id || undefined,
         response_mode: row.response_mode || undefined,
         recent_context: row.recent_context || undefined,
+        attachments: row.attachments_json ? JSON.parse(row.attachments_json) : undefined,
         engagement,
       };
       const ttl = isRequiredVelHardTag(cmd) ? REQUIRED_PENDING_TTL_MS : PENDING_TTL_MS;
@@ -1976,6 +1996,7 @@ export class CompanionBot extends McpAgent<Env> {
       referenced_author_id: row.referenced_author_id || undefined,
       response_mode: row.response_mode || undefined,
       recent_context: row.recent_context || undefined,
+      attachments: row.attachments_json ? JSON.parse(row.attachments_json) : undefined,
       engagement: row.engagement ? JSON.parse(row.engagement) : undefined,
     }));
   }
@@ -1983,8 +2004,8 @@ export class CompanionBot extends McpAgent<Env> {
   private storeCommand(cmd: PendingCommand) {
     this.ensureTable();
     this.ctx.storage.sql.exec(
-      `INSERT INTO pending_commands (id, companion_id, content, author_username, author_id, channel_id, webhook_url, channel_label, disposition, trigger_reason, priority, source, message_id, mention_ids, referenced_author_id, response_mode, recent_context, engagement, timestamp)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO pending_commands (id, companion_id, content, author_username, author_id, channel_id, webhook_url, channel_label, disposition, trigger_reason, priority, source, message_id, mention_ids, referenced_author_id, response_mode, recent_context, attachments_json, engagement, timestamp)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       cmd.id,
       cmd.companion_id,
       cmd.content,
@@ -2002,6 +2023,7 @@ export class CompanionBot extends McpAgent<Env> {
       cmd.referenced_author_id || null,
       cmd.response_mode || null,
       cmd.recent_context || null,
+      cmd.attachments ? JSON.stringify(cmd.attachments) : null,
       cmd.engagement ? JSON.stringify(cmd.engagement) : null,
       cmd.timestamp
     );
@@ -3049,6 +3071,7 @@ export class CompanionBot extends McpAgent<Env> {
         author: { username: string; id?: string };
         channel_id: string;
         webhook_url?: string;
+        attachments?: unknown;
       };
 
       const companion = this.getCompanionById(body.companion_id);
@@ -3082,6 +3105,7 @@ export class CompanionBot extends McpAgent<Env> {
         trigger_reason: manualTriggerReason,
         priority: manualPriority,
         source: 'manual',
+        attachments: discordAttachmentMetadata(body.attachments),
         engagement: {
           disposition: authorIsVel || hasKaiTrigger ? 'respond' : 'log',
           trigger_reason: manualTriggerReason,
@@ -3141,6 +3165,7 @@ export class CompanionBot extends McpAgent<Env> {
         referenced_author_id: cmd.referenced_author_id,
         response_mode: cmd.response_mode,
         recent_context: cmd.recent_context,
+        attachments: cmd.attachments || [],
         engagement: cmd.engagement,
         age_seconds: Math.round((now - cmd.timestamp) / 1000),
         expires_in_seconds: Math.max(0, Math.round((ttl - (now - cmd.timestamp)) / 1000)),
@@ -3291,6 +3316,7 @@ export class CompanionBot extends McpAgent<Env> {
                 referenced_author_id: referencedAuthorId,
                 response_mode: 'open',
                 recent_context: recentContext,
+                attachments: discordAttachmentMetadata(msg.attachments),
                 engagement,
                 timestamp: Date.parse(msg.timestamp) || Date.now(),
               };
@@ -3506,6 +3532,7 @@ export class CompanionBot extends McpAgent<Env> {
               referenced_author_id: referencedAuthorId,
               response_mode: monitor.response_mode,
               recent_context: recentContext,
+              attachments: discordAttachmentMetadata(msg.attachments),
               engagement,
               timestamp: Date.parse(msg.timestamp) || Date.now(),
             };
