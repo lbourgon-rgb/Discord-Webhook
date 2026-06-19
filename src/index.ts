@@ -50,6 +50,9 @@ interface Env {
   KAI_NEXUS_URL?: string;
   KAI_DEFAULT_MODEL?: string;
   KAI_BACKUP_MODEL?: string;
+  KAI_SOCIAL_GUILD_IDS?: string;
+  KAI_SOCIAL_HARD_TAG_CHANNEL_IDS?: string;
+  KAI_SOCIAL_AUTORESPOND_ENABLED?: string;
   LUCIEN_CHATGPT_RUNNER_ENABLED?: string;
   LUCIEN_CHATGPT_AUTORESPOND?: string;
   LUCIEN_CHATGPT_DELIVERY_ENABLED?: string;
@@ -191,6 +194,20 @@ function isKaiAccessibleChannel(env: Env, channelId: string): boolean {
 function isKaiListenChannel(env: Env, channelId: string): boolean {
   const listen = getKaiListenChannelIds(env);
   return listen.length > 0 && listen.includes(channelId) && isKaiAccessibleChannel(env, channelId);
+}
+
+function getKaiSocialHardTagChannelIds(env: Env): string[] {
+  return splitIds(env.KAI_SOCIAL_HARD_TAG_CHANNEL_IDS);
+}
+
+function isKaiSocialHardTagChannel(env: Env, channelId: string): boolean {
+  return getKaiSocialHardTagChannelIds(env).includes(channelId);
+}
+
+function isKaiSocialAutorespondEnabled(env: Env): boolean {
+  return env.KAI_SOCIAL_AUTORESPOND_ENABLED !== undefined
+    ? env.KAI_SOCIAL_AUTORESPOND_ENABLED === 'true'
+    : isKaiAutorespondEnabled(env);
 }
 
 function companionSeedBotUserIds(companion: string | Companion): string[] {
@@ -706,6 +723,7 @@ interface PendingCommand {
   author: { username: string; id?: string };
   author_id?: string;
   channel_id: string;
+  guild_id?: string;
   webhook_url?: string;
   timestamp: number;
   channel_label?: string;
@@ -724,13 +742,14 @@ interface PendingCommand {
 
 function kaiRunnerEnvelopeForCommand(command: PendingCommand): Record<string, unknown> {
   return {
-    guild_id: undefined,
+    guild_id: command.guild_id,
     channel_id: command.channel_id,
     message_id: command.message_id || command.id,
     author_id: command.author?.id || command.author_id,
     author_username: command.author?.username,
     timestamp: new Date(command.timestamp).toISOString(),
     content: command.content,
+    recent_context: command.recent_context,
     mentions: command.mention_ids || [],
     attachments: command.attachments || [],
     trigger: command.source === 'manual'
@@ -783,6 +802,30 @@ async function discordRequest(env: Env, endpoint: string, options: RequestInit =
 
   if (response.status === 204) return {};
   return response.json();
+}
+
+function firstMcpText(value: any): string | null {
+  const result = value?.result && typeof value.result === 'object' ? value.result : value;
+  const content = Array.isArray(result?.content) ? result.content : [];
+  const first = content[0];
+  return typeof first?.text === 'string' ? first.text : null;
+}
+
+function runnerSocialDecision(runnerResult: any): { decision?: string; recommended_reaction?: string } | null {
+  const text = firstMcpText(runnerResult?.context?.social_engagement);
+  if (!text) return null;
+  try {
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+async function addKaiSocialReaction(env: Env, channelId: string, messageId: string, emoji: string): Promise<void> {
+  const encoded = encodeURIComponent(emoji || '👀');
+  const result = await discordRequest(env, `/channels/${channelId}/messages/${messageId}/reactions/${encoded}/@me`, { method: 'PUT' });
+  if (result?.error) throw new Error(`Discord reaction error: ${JSON.stringify(result)}`);
 }
 
 // Helper: Fetch available guilds and format as hint text
@@ -852,6 +895,7 @@ export class CompanionBot extends McpAgent<Env> {
       author_username TEXT NOT NULL,
       author_id TEXT,
       channel_id TEXT NOT NULL,
+      guild_id TEXT,
       webhook_url TEXT,
       channel_label TEXT,
       disposition TEXT,
@@ -1029,6 +1073,7 @@ export class CompanionBot extends McpAgent<Env> {
     } catch (_) {}
     for (const stmt of [
       `ALTER TABLE pending_commands ADD COLUMN channel_label TEXT`,
+      `ALTER TABLE pending_commands ADD COLUMN guild_id TEXT`,
       `ALTER TABLE pending_commands ADD COLUMN disposition TEXT`,
       `ALTER TABLE pending_commands ADD COLUMN trigger_reason TEXT`,
       `ALTER TABLE pending_commands ADD COLUMN priority TEXT`,
@@ -1087,15 +1132,31 @@ export class CompanionBot extends McpAgent<Env> {
   private seedBootstrapMonitors() {
     const now = Date.now();
     const kaiListenChannels = getKaiListenChannelIds(this.env);
-    const channels = kaiListenChannels.length
+    const privateChannels = kaiListenChannels.length
       ? kaiListenChannels.filter(channelId => isKaiAccessibleChannel(this.env, channelId))
       : (this.env.WATCH_CHANNELS || '').split(',').map(s => s.trim()).filter(Boolean);
-    const addedBy = kaiListenChannels.length ? 'KAI_LISTEN_CHANNEL_IDS' : 'WATCH_CHANNELS';
-    for (const channelId of channels) {
+    const socialChannels = getKaiSocialHardTagChannelIds(this.env);
+    const monitorConfigs = [
+      ...privateChannels.map(channelId => ({
+        channelId,
+        addedBy: kaiListenChannels.length ? 'KAI_LISTEN_CHANNEL_IDS' : 'WATCH_CHANNELS',
+        responseMode: 'filtered',
+      })),
+      ...socialChannels.map(channelId => ({
+        channelId,
+        addedBy: 'KAI_SOCIAL_HARD_TAG_CHANNEL_IDS',
+        responseMode: 'mention',
+      })),
+    ];
+    for (const config of monitorConfigs) {
       this.ctx.storage.sql.exec(
         `INSERT OR IGNORE INTO discord_monitors (id, channel_id, label, tier, enabled, respond_enabled, response_mode, last_checked, cooldown_ms, last_responded, added_by, added_at)
          VALUES (?, ?, ?, 'normal', 1, 1, 'filtered', 0, 300000, 0, ?, ?)`,
-        `monitor:${channelId}`, channelId, channelId, addedBy, now
+        `monitor:${config.channelId}`, config.channelId, config.channelId, config.addedBy, now
+      );
+      this.ctx.storage.sql.exec(
+        `UPDATE discord_monitors SET response_mode = ?, respond_enabled = 1 WHERE channel_id = ? AND added_by = ?`,
+        config.responseMode, config.channelId, config.addedBy
       );
     }
   }
@@ -1941,6 +2002,7 @@ export class CompanionBot extends McpAgent<Env> {
         content: row.content,
         author: { username: row.author_username, id: row.author_id || undefined },
         channel_id: row.channel_id,
+        guild_id: row.guild_id || undefined,
         webhook_url: row.webhook_url || undefined,
         timestamp: row.timestamp,
         channel_label: row.channel_label || undefined,
@@ -1986,6 +2048,7 @@ export class CompanionBot extends McpAgent<Env> {
       content: row.content,
       author: { username: row.author_username, id: row.author_id || undefined },
       channel_id: row.channel_id,
+      guild_id: row.guild_id || undefined,
       webhook_url: row.webhook_url || undefined,
       timestamp: row.timestamp,
       channel_label: row.channel_label || undefined,
@@ -2006,14 +2069,15 @@ export class CompanionBot extends McpAgent<Env> {
   private storeCommand(cmd: PendingCommand) {
     this.ensureTable();
     this.ctx.storage.sql.exec(
-      `INSERT INTO pending_commands (id, companion_id, content, author_username, author_id, channel_id, webhook_url, channel_label, disposition, trigger_reason, priority, source, message_id, mention_ids, referenced_author_id, response_mode, recent_context, attachments_json, engagement, timestamp)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO pending_commands (id, companion_id, content, author_username, author_id, channel_id, guild_id, webhook_url, channel_label, disposition, trigger_reason, priority, source, message_id, mention_ids, referenced_author_id, response_mode, recent_context, attachments_json, engagement, timestamp)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       cmd.id,
       cmd.companion_id,
       cmd.content,
       cmd.author.username,
       cmd.author.id || null,
       cmd.channel_id,
+      cmd.guild_id || null,
       cmd.webhook_url || null,
       cmd.channel_label || null,
       cmd.disposition || null,
@@ -2078,6 +2142,35 @@ export class CompanionBot extends McpAgent<Env> {
         dry_run: true,
       });
       const generatedResponse = String(runnerResult.response || '').trim();
+      if (!generatedResponse && runnerResult?.should_respond === false) {
+        const social = runnerSocialDecision(runnerResult);
+        const decision = social?.decision || 'silence';
+        const sentReactions: string[] = [];
+        if (decision === 'react' && deliver && isKaiDeliveryEnabled(this.env) && command.message_id) {
+          const emoji = social?.recommended_reaction || '👀';
+          await addKaiSocialReaction(this.env, command.channel_id, command.message_id, emoji);
+          sentReactions.push(emoji);
+        }
+        await releaseWakeCandidate(this.env, claimData.wake_candidate.id, runnerId, `social engagement decision: ${decision}`).catch(() => null);
+        this.logActivity(command.companion_id, decision === 'react' ? 'responded' : 'ignored', command.channel_id, `Social engagement decision: ${decision}`, command.author.username, command.message_id, undefined, {
+          authorId: command.author?.id || command.author_id,
+          engagement: command.engagement,
+          mentionIds: command.mention_ids,
+          referencedAuthorId: command.referenced_author_id,
+          skipContinuity: true,
+        });
+        this.deleteCommand(requestId);
+        return new Response(JSON.stringify({
+          ok: true,
+          mode: decision === 'react' ? 'social_reaction' : 'social_silence',
+          request_id: requestId,
+          continuity_event_id: claimData.event_id,
+          wake_candidate_id: claimData.wake_candidate.id,
+          decision,
+          sent_reactions: sentReactions,
+          delivery_enabled: isKaiDeliveryEnabled(this.env),
+        }, null, 2), { headers: { 'Content-Type': 'application/json' } });
+      }
       if (!generatedResponse && this.env.KAI_RUNNER_ROUTE === 'nexus' && runnerResult?.generated === false) {
         await releaseWakeCandidate(this.env, claimData.wake_candidate.id, runnerId, 'nexus dry-run contract; no text generation yet').catch(() => null);
         return new Response(JSON.stringify({
@@ -3211,6 +3304,7 @@ export class CompanionBot extends McpAgent<Env> {
     for (const monitor of monitors) {
       const channelId = monitor.channel_id;
       try {
+        const guildId = await this.resolveGuildId(channelId).catch(() => null);
         const cursor = monitor.last_message_id || this.getCursor(channelId);
         // Build Discord API URL — fetch messages after our cursor
         let endpoint = `/channels/${channelId}/messages?limit=50`;
@@ -3275,6 +3369,69 @@ export class CompanionBot extends McpAgent<Env> {
           if (
             !isWebhook
             && isKaiListenerEnabled(this.env)
+            && isKaiSocialAutorespondEnabled(this.env)
+            && isKaiSocialHardTagChannel(this.env, channelId)
+          ) {
+            const mentionIds = normalizeMentionIds(msg.mentions);
+            const hardKaiMention = containsHardKaiMention(msg.content, this.env, mentionIds);
+            if (hardKaiMention) {
+              const companion = this.getCompanionById('kai');
+              if (!companion) continue;
+              const authorName = msg.author?.global_name || msg.author?.username || 'unknown';
+              const recentContext = this.formatRecentContext(messages);
+              const engagement: EngagementDecision = {
+                disposition: 'respond',
+                trigger_reason: 'digital-haven-public-hard-tag',
+                priority: 'high',
+                hard_mention: true,
+                soft_name_mention: false,
+                active_conversation: false,
+                direct_reply_to_kai: false,
+                other_user_tag: mentionsNonKaiUser(msg.content, this.env, mentionIds),
+                author_class: isVelDiscordAuthor(this.env, msg.author?.id) ? 'vel' : 'unknown',
+                community_greeting: isCommunityGreeting(msg.content),
+              };
+              const command: PendingCommand = {
+                id: crypto.randomUUID(),
+                companion_id: companion.id,
+                content: msg.content,
+                author: { username: authorName, id: msg.author?.id },
+                channel_id: channelId,
+                guild_id: guildId || String(msg.guild_id || '') || undefined,
+                channel_label: monitor.label,
+                disposition: 'respond',
+                trigger_reason: engagement.trigger_reason,
+                priority: 'high',
+                source: 'poll',
+                message_id: msg.id,
+                mention_ids: mentionIds,
+                response_mode: 'mention',
+                recent_context: recentContext,
+                attachments: discordAttachmentMetadata(msg.attachments),
+                engagement,
+                timestamp: Date.parse(msg.timestamp) || Date.now(),
+              };
+              this.storeCommand(command);
+              const activityDebug = { authorId: msg.author?.id, engagement, mentionIds, createdAt: msg.timestamp };
+              this.logActivity(companion.id, 'queued', channelId, msg.content, authorName, msg.id, undefined, activityDebug);
+              totalStored++;
+              try {
+                const runnerResponse = await this.runHavenRunnerFromDashboard(command.id, isKaiDeliveryEnabled(this.env), 'autorespond');
+                if (!runnerResponse.ok) {
+                  const errorText = await runnerResponse.text().catch(() => '');
+                  this.logActivity(companion.id, 'runner_failed', channelId, errorText || `Kai social runner returned ${runnerResponse.status}`, authorName, msg.id, undefined, activityDebug);
+                }
+              } catch (error) {
+                this.logActivity(companion.id, 'runner_failed', channelId, error instanceof Error ? error.message : String(error), authorName, msg.id, undefined, activityDebug);
+              }
+              console.log(`Cron: ${companion.name} Digital Haven hard-tag by "${msg.content}" from ${authorName}`);
+              continue;
+            }
+          }
+
+          if (
+            !isWebhook
+            && isKaiListenerEnabled(this.env)
             && isKaiDeliveryEnabled(this.env)
             && isKaiAutorespondEnabled(this.env)
             && isKaiListenChannel(this.env, channelId)
@@ -3308,6 +3465,7 @@ export class CompanionBot extends McpAgent<Env> {
                 content: msg.content,
                 author: { username: authorName, id: msg.author?.id },
                 channel_id: channelId,
+                guild_id: guildId || String(msg.guild_id || '') || undefined,
                 channel_label: monitor.label,
                 disposition: 'respond',
                 trigger_reason: engagement.trigger_reason,
@@ -3997,6 +4155,27 @@ export class CompanionBot extends McpAgent<Env> {
               });
 
               const generatedResponse = String(runnerResult.response || '').trim();
+              if (!generatedResponse && runnerResult?.should_respond === false) {
+                const social = runnerSocialDecision(runnerResult);
+                const decision = social?.decision || 'silence';
+                const sentReactions: string[] = [];
+                if (decision === 'react' && shouldDeliver && isKaiDeliveryEnabled(this.env) && command.message_id) {
+                  const emoji = social?.recommended_reaction || '👀';
+                  await addKaiSocialReaction(this.env, command.channel_id, command.message_id, emoji);
+                  sentReactions.push(emoji);
+                }
+                await releaseWakeCandidate(this.env, claimData.wake_candidate.id, activeRunnerId, `social engagement decision: ${decision}`).catch(() => null);
+                return { content: [{ type: "text" as const, text: JSON.stringify({
+                  ok: true,
+                  mode: decision === 'react' ? 'social_reaction' : 'social_silence',
+                  requestId,
+                  continuity_event_id: claimData.event_id,
+                  wake_candidate_id: claimData.wake_candidate.id,
+                  decision,
+                  sent_reactions: sentReactions,
+                  delivery_enabled: isKaiDeliveryEnabled(this.env),
+                }, null, 2) }] };
+              }
               if (!generatedResponse && this.env.KAI_RUNNER_ROUTE === 'nexus' && runnerResult?.generated === false) {
                 await releaseWakeCandidate(this.env, claimData.wake_candidate.id, activeRunnerId, 'nexus dry-run contract; no text generation yet').catch(() => null);
                 return { content: [{ type: "text" as const, text: JSON.stringify({
