@@ -585,6 +585,13 @@ async function callNexusKaiRunner(env: Env, body: Record<string, unknown>): Prom
     data = JSON.parse(text);
   } catch {}
   if (!response.ok) throw new Error(`nexus runner ${response.status}: ${text.slice(0, 400)}`);
+  if (data && typeof data === 'object' && data.generated === false) {
+    const generation = data.generation && typeof data.generation === 'object' ? data.generation as Record<string, unknown> : null;
+    const generationError = typeof generation?.error === 'string' ? generation.error : '';
+    if (generation?.attempted === true && generation?.ok === false && isTransientKaiRunnerModelError(generationError)) {
+      throw new Error(`nexus runner generation failed: ${generationError}`);
+    }
+  }
   return data;
 }
 
@@ -2232,7 +2239,6 @@ export class CompanionBot extends McpAgent<Env> {
           engagement: command.engagement,
           mentionIds: command.mention_ids,
           referencedAuthorId: command.referenced_author_id,
-          skipContinuity: true,
         });
         this.deleteCommand(requestId);
         return new Response(JSON.stringify({
