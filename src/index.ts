@@ -22,6 +22,8 @@ const DISCORD_API = 'https://discord.com/api/v10';
 const KAI_HAVEN_RUNNER_DEFAULT_MODEL = 'z-ai/glm-5.2';
 const KAI_HAVEN_RUNNER_FALLBACK_MODELS = ['deepseek/deepseek-v4-flash'];
 const DEFAULT_KAI_DISCORD_USER_ID = '1447789482253484175';
+const KAI_MODEL_OVERRIDE_STORAGE_KEY = 'kai:model_override';
+const KAI_MODEL_ID_PATTERN = /^[a-z0-9][a-z0-9._:/-]{1,119}$/i;
 
 interface Env {
   COMPANION_BOT: DurableObjectNamespace<CompanionBot>;
@@ -655,6 +657,7 @@ async function findContinuityEventForCommand(env: Env, command: PendingCommand):
 
 async function createAndClaimWakeForCommand(env: Env, command: PendingCommand, runnerId: string, leaseSeconds: number = 300): Promise<{ event_id: string; wake_candidate: any; wake_context: any }> {
   const externalMessageId = command.message_id || command.id;
+  const continuityContent = discordContinuityContent(command.content, command.attachments);
   const existingEvent = await findContinuityEventForCommand(env, command);
   let eventId = existingEvent?.id ? String(existingEvent.id) : null;
   if (!eventId) {
@@ -668,7 +671,7 @@ async function createAndClaimWakeForCommand(env: Env, command: PendingCommand, r
           id: command.author?.id || command.author_id,
           name: command.author?.username || 'unknown',
         },
-        content: command.content,
+        content: continuityContent,
         created_at: command.timestamp ? new Date(command.timestamp).toISOString() : undefined,
         reply_to: command.referenced_author_id || null,
         metadata: {
@@ -796,6 +799,33 @@ function isImageAttachmentMetadata(attachment: Record<string, unknown>): boolean
   return contentType.startsWith('image/')
     || /\.(png|jpe?g|webp|gif|avif)(\?|$)/i.test(filename)
     || /\.(png|jpe?g|webp|gif|avif)(\?|$)/i.test(url);
+}
+
+function attachmentSummaryText(attachments: unknown): string {
+  const normalized = discordAttachmentMetadata(attachments);
+  if (!normalized.length) return '';
+  return normalized
+    .map((attachment) => {
+      const kind = isImageAttachmentMetadata(attachment) ? 'image' : 'file';
+      const name = String(attachment.filename || attachment.id || 'attachment');
+      const type = attachment.content_type ? ` ${attachment.content_type}` : '';
+      return `[Discord ${kind} attachment: ${name}${type}]`;
+    })
+    .join(' ');
+}
+
+function discordContinuityContent(content: unknown, attachments?: unknown): string {
+  const text = String(content || '').trim();
+  return text || attachmentSummaryText(attachments);
+}
+
+function normalizeKaiModelOverride(value: unknown): string | null {
+  const model = typeof value === 'string' ? value.trim() : '';
+  if (!model) return null;
+  if (!KAI_MODEL_ID_PATTERN.test(model)) {
+    throw new Error('Kai model override must be a valid model id such as z-ai/glm-5.2');
+  }
+  return model;
 }
 
 function messageHasUsableContent(message: any): boolean {
@@ -1425,14 +1455,17 @@ export class CompanionBot extends McpAgent<Env> {
     skipContinuity?: boolean;
   }) {
     this.ensureTable();
+    const storedContent = discordContinuityContent(content, debug?.attachments);
     this.ctx.storage.sql.exec(
       `INSERT INTO companion_activity (id, companion_id, type, channel_id, content, author, author_id, engagement, message_id, webhook_url, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      crypto.randomUUID(), companionId, type, channelId || null, content || null, author || null,
+      crypto.randomUUID(), companionId, type, channelId || null, storedContent || null, author || null,
       debug?.authorId || null,
       debug?.engagement ? JSON.stringify({
         ...engagementDebug(debug.engagement),
         mention_ids: debug.mentionIds || [],
         referenced_author_id: debug.referencedAuthorId || null,
+        attachment_count: debug.attachments?.length || 0,
+        image_attachment_count: debug.attachments?.filter(isImageAttachmentMetadata).length || 0,
       }) : null,
       messageId || null, webhookUrl || null, Date.now()
     );
@@ -1445,7 +1478,7 @@ export class CompanionBot extends McpAgent<Env> {
     const inboundTypes = new Set(['triggered', 'queued', 'logged', 'ignored']);
     const outboundTypes = new Set(['sent', 'responded', 'edited', 'deleted']);
     const auditTypes = new Set(['dismissed', 'expired', 'discernment_blocked']);
-    if (!debug?.skipContinuity && content && messageId && (inboundTypes.has(type) || outboundTypes.has(type) || auditTypes.has(type))) {
+    if (!debug?.skipContinuity && storedContent && messageId && (inboundTypes.has(type) || outboundTypes.has(type) || auditTypes.has(type))) {
       const isHumanTrigger = inboundTypes.has(type);
       const isAudit = auditTypes.has(type);
       postContinuityEvent(this.env, {
@@ -1454,7 +1487,7 @@ export class CompanionBot extends McpAgent<Env> {
         external_message_id: isAudit ? `${messageId}:${type}` : messageId,
         role: isAudit ? 'system' : (isHumanTrigger ? 'human' : 'companion'),
         author: { id: debug?.authorId || undefined, name: author || (isHumanTrigger ? 'unknown' : companionId) },
-        content,
+        content: storedContent,
         created_at: debug?.createdAt,
         metadata: {
           activity_type: type,
@@ -2032,12 +2065,12 @@ export class CompanionBot extends McpAgent<Env> {
       .join('\n');
   }
 
-  private async recentImageAttachmentsBefore(channelId: string, msg: any, windowMs = 20 * 60 * 1000): Promise<Array<Record<string, unknown>>> {
+  private async recentImageAttachmentsBefore(channelId: string, msg: any, windowMs = 2 * 60 * 60 * 1000): Promise<Array<Record<string, unknown>>> {
     const authorId = String(msg?.author?.id || '');
     if (!channelId || !authorId || !msg?.id) return [];
     const currentMs = Date.parse(msg.timestamp || '') || Date.now();
     try {
-      const priorMessages = await discordRequest(this.env, `/channels/${channelId}/messages?before=${encodeURIComponent(msg.id)}&limit=10`);
+      const priorMessages = await discordRequest(this.env, `/channels/${channelId}/messages?before=${encodeURIComponent(msg.id)}&limit=25`);
       if (!Array.isArray(priorMessages)) return [];
       const attachments: Array<Record<string, unknown>> = [];
       for (const prior of priorMessages) {
@@ -2064,7 +2097,7 @@ export class CompanionBot extends McpAgent<Env> {
     const current = discordAttachmentMetadata(msg?.attachments);
     const text = String(msg?.content || '');
     const shouldLookBack = current.filter(isImageAttachmentMetadata).length === 0
-      && /\b(image|img|pic|picture|photo|attachment|see this|look at this)\b/i.test(text);
+      && /\b(images?|imgs?|pics?|pictures?|photos?|screenshots?|attachments?|attached|uploaded|uploads?|see this|look at this)\b/i.test(text);
     if (!shouldLookBack) return current;
     return mergeAttachmentMetadata(current, await this.recentImageAttachmentsBefore(channelId, msg));
   }
@@ -2182,6 +2215,34 @@ export class CompanionBot extends McpAgent<Env> {
     this.ctx.storage.sql.exec(`DELETE FROM pending_commands WHERE id = ?`, id);
   }
 
+  private async getKaiModelOverride(): Promise<string | null> {
+    const stored = await this.ctx.storage.get<string>(KAI_MODEL_OVERRIDE_STORAGE_KEY);
+    return stored ? normalizeKaiModelOverride(stored) : null;
+  }
+
+  private async setKaiModelOverride(model: string | null): Promise<string | null> {
+    if (model) {
+      const normalized = normalizeKaiModelOverride(model);
+      await this.ctx.storage.put(KAI_MODEL_OVERRIDE_STORAGE_KEY, normalized);
+      return normalized;
+    }
+    await this.ctx.storage.delete(KAI_MODEL_OVERRIDE_STORAGE_KEY);
+    return null;
+  }
+
+  private async kaiModelState(): Promise<Record<string, unknown>> {
+    const modelOverride = await this.getKaiModelOverride();
+    const defaultModel = this.env.KAI_DEFAULT_MODEL || KAI_HAVEN_RUNNER_DEFAULT_MODEL;
+    return {
+      companion_id: 'kai',
+      model_override: modelOverride,
+      default_model: defaultModel,
+      backup_model: this.env.KAI_BACKUP_MODEL || KAI_HAVEN_RUNNER_FALLBACK_MODELS[0],
+      active_model: modelOverride || defaultModel,
+      runner_route: this.env.KAI_RUNNER_ROUTE || 'haven',
+    };
+  }
+
   private async runHavenRunnerFromDashboard(requestId: string, deliver: boolean, origin: 'dashboard' | 'autorespond' = 'dashboard'): Promise<Response> {
     this.ensureTable();
     if (!isKaiListenerEnabled(this.env)) {
@@ -2207,6 +2268,7 @@ export class CompanionBot extends McpAgent<Env> {
     const runnerId = `haven-runner:kai-${origin}`;
     let claimData: { event_id: string; wake_candidate: any; wake_context: any } | null = null;
     try {
+      const modelOverride = await this.getKaiModelOverride();
       claimData = await createAndClaimWakeForCommand(this.env, command, runnerId);
       const runnerResult = await callKaiRunnerWithFallback(this.env, {
         envelope: kaiRunnerEnvelopeForCommand(command),
@@ -2222,6 +2284,7 @@ export class CompanionBot extends McpAgent<Env> {
         recent_context: command.recent_context,
         wake_context: claimData.wake_context,
         dry_run: true,
+        ...(modelOverride ? { model: modelOverride } : {}),
       });
       const generatedResponse = String(runnerResult.response || '').trim();
       if (!generatedResponse && runnerResult?.should_respond === false) {
@@ -2899,6 +2962,33 @@ export class CompanionBot extends McpAgent<Env> {
       return new Response(JSON.stringify({ companion_id: channelsMatch[1], blocked_channels: blocked, updated: true }), {
         headers: { 'Content-Type': 'application/json' },
       });
+    }
+
+    // ===== Kai model override API =====
+
+    if (url.pathname === '/api/companions/kai/model' && request.method === 'GET') {
+      return new Response(JSON.stringify(await this.kaiModelState()), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.pathname === '/api/companions/kai/model' && request.method === 'PUT') {
+      try {
+        const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+        const model = body.model === null ? null : normalizeKaiModelOverride(body.model);
+        await this.setKaiModelOverride(model);
+        return new Response(JSON.stringify({ ok: true, ...(await this.kaiModelState()) }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      } catch (error) {
+        return new Response(JSON.stringify({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
     }
 
     // ===== Companion activity API =====
