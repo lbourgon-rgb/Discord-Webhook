@@ -24,6 +24,8 @@ const KAI_HAVEN_RUNNER_FALLBACK_MODELS = ['deepseek/deepseek-v4-flash'];
 const DEFAULT_KAI_DISCORD_USER_ID = '1447789482253484175';
 const KAI_MODEL_OVERRIDE_STORAGE_KEY = 'kai:model_override';
 const KAI_MODEL_ID_PATTERN = /^[a-z0-9][a-z0-9._:/-]{1,119}$/i;
+const KAI_PUBLIC_MIND_ORIGIN = 'https://mind.serythrae.com';
+const KAI_IMAGE_FALLBACK_RESPONSE = 'I made this for you and saved it in the Serythrae vault.';
 
 interface Env {
   COMPANION_BOT: DurableObjectNamespace<CompanionBot>;
@@ -890,6 +892,110 @@ function runnerSocialDecision(runnerResult: any): { decision?: string; recommend
   } catch {
     return null;
   }
+}
+
+interface KaiGeneratedDiscordImage {
+  index: number;
+  url: string;
+  key?: string;
+  stored_url?: string;
+  source_url?: string;
+  content_type?: string;
+}
+
+function absoluteKaiImageUrl(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const url = value.trim();
+  if (url.startsWith('/img/')) return `${KAI_PUBLIC_MIND_ORIGIN}${url}`;
+  if (/^https?:\/\//i.test(url)) return url;
+  return null;
+}
+
+function kaiGeneratedDiscordImages(runnerResult: any): KaiGeneratedDiscordImage[] {
+  const images = runnerResult?.image_generation?.images;
+  if (!Array.isArray(images)) return [];
+  return images
+    .map((image: any, index: number): KaiGeneratedDiscordImage | null => {
+      if (!image || typeof image !== 'object' || Array.isArray(image)) return null;
+      const storedUrl = absoluteKaiImageUrl(image.stored_url);
+      const sourceUrl = absoluteKaiImageUrl(image.url);
+      const url = storedUrl || sourceUrl;
+      if (!url) return null;
+      return {
+        index: typeof image.index === 'number' ? image.index : index,
+        url,
+        key: typeof image.r2_key === 'string' ? image.r2_key : undefined,
+        stored_url: typeof image.stored_url === 'string' ? image.stored_url : undefined,
+        source_url: typeof image.url === 'string' ? image.url : undefined,
+        content_type: typeof image.mime_type === 'string' ? image.mime_type : undefined,
+      };
+    })
+    .filter((image): image is KaiGeneratedDiscordImage => Boolean(image));
+}
+
+function kaiImageEmbeds(images: KaiGeneratedDiscordImage[]): Array<Record<string, unknown>> {
+  return images.map((image, index) => ({
+    title: images.length > 1 ? `Generated image ${index + 1}` : 'Generated image',
+    url: image.url,
+    image: { url: image.url },
+    ...(image.key ? { footer: { text: image.key } } : {}),
+  }));
+}
+
+function kaiGeneratedImageMetadata(images: KaiGeneratedDiscordImage[], sentMessageIds: string[]): Record<string, unknown>[] {
+  return images.map((image, index) => ({
+    index: image.index,
+    url: image.url,
+    r2_key: image.key || null,
+    stored_url: image.stored_url || null,
+    source_url: image.source_url || null,
+    content_type: image.content_type || null,
+    discord_message_id: sentMessageIds[index] || null,
+  }));
+}
+
+async function sendKaiGeneratedImages(
+  env: Env,
+  command: PendingCommand,
+  companion: Companion,
+  images: KaiGeneratedDiscordImage[],
+  targetWebhookUrl?: string | null
+): Promise<{ sentMessageIds: string[]; sentWebhookUrl?: string }> {
+  if (!images.length) return { sentMessageIds: [] };
+  const sentMessageIds: string[] = [];
+  const caption = images.length > 1 ? 'Generated images:' : 'Generated image:';
+  const embeds = kaiImageEmbeds(images);
+  const embedGroups: Array<Array<Record<string, unknown>>> = [];
+  for (let i = 0; i < embeds.length; i += 10) embedGroups.push(embeds.slice(i, i + 10));
+
+  if (targetWebhookUrl) {
+    for (const group of embedGroups) {
+      const res = await fetch(`${targetWebhookUrl}?wait=true`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content: caption,
+          username: companion.name,
+          avatar_url: companion.avatar_url,
+          embeds: group,
+        }),
+      });
+      if (!res.ok) throw new Error(`Webhook image delivery failed: ${await res.text()}`);
+      const msgData = await res.json() as any;
+      sentMessageIds.push(msgData.id);
+    }
+    return { sentMessageIds, sentWebhookUrl: targetWebhookUrl };
+  }
+
+  for (const group of embedGroups) {
+    const result = await discordRequest(env, `/channels/${command.channel_id}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ content: caption, embeds: group }),
+    });
+    if (result.error) throw new Error(`Discord image delivery error: ${JSON.stringify(result)}`);
+    sentMessageIds.push(result.id);
+  }
+  return { sentMessageIds };
 }
 
 async function addKaiSocialReaction(env: Env, channelId: string, messageId: string, emoji: string): Promise<void> {
@@ -2287,7 +2393,9 @@ export class CompanionBot extends McpAgent<Env> {
         ...(modelOverride ? { model: modelOverride } : {}),
       });
       const generatedResponse = String(runnerResult.response || '').trim();
-      if (!generatedResponse && runnerResult?.should_respond === false) {
+      const generatedImages = kaiGeneratedDiscordImages(runnerResult);
+      const deliveryResponse = generatedResponse || (generatedImages.length ? KAI_IMAGE_FALLBACK_RESPONSE : '');
+      if (!deliveryResponse && runnerResult?.should_respond === false) {
         const social = runnerSocialDecision(runnerResult);
         const decision = social?.decision || 'silence';
         const sentReactions: string[] = [];
@@ -2315,7 +2423,7 @@ export class CompanionBot extends McpAgent<Env> {
           delivery_enabled: isKaiDeliveryEnabled(this.env),
         }, null, 2), { headers: { 'Content-Type': 'application/json' } });
       }
-      if (!generatedResponse && this.env.KAI_RUNNER_ROUTE === 'nexus' && runnerResult?.generated === false) {
+      if (!deliveryResponse && this.env.KAI_RUNNER_ROUTE === 'nexus' && runnerResult?.generated === false) {
         await releaseWakeCandidate(this.env, claimData.wake_candidate.id, runnerId, 'nexus dry-run contract; no text generation yet').catch(() => null);
         return new Response(JSON.stringify({
           ok: true,
@@ -2326,10 +2434,10 @@ export class CompanionBot extends McpAgent<Env> {
           runner_result: runnerResult,
         }, null, 2), { headers: { 'Content-Type': 'application/json' } });
       }
-      if (!generatedResponse) throw new Error('Kai runner returned an empty response');
-      const kaiDriftReason = kaiIdentityDriftReason(generatedResponse);
+      if (!deliveryResponse) throw new Error('Kai runner returned an empty response');
+      const kaiDriftReason = generatedResponse ? kaiIdentityDriftReason(generatedResponse) : null;
       const nonVelKaiReply = !isVelDiscordAuthor(this.env, command.author?.id || command.author_id);
-      const unsafeReason = nonVelKaiReply ? nonVelUnsafeResponseReason(generatedResponse) : null;
+      const unsafeReason = nonVelKaiReply && generatedResponse ? nonVelUnsafeResponseReason(generatedResponse) : null;
       const blockedReason = kaiDriftReason || unsafeReason;
       if (blockedReason) {
         await releaseWakeCandidate(this.env, claimData.wake_candidate.id, runnerId, `dashboard blocked: ${blockedReason}`).catch(() => null);
@@ -2340,7 +2448,8 @@ export class CompanionBot extends McpAgent<Env> {
           request_id: requestId,
           continuity_event_id: claimData.event_id,
           wake_candidate_id: claimData.wake_candidate.id,
-          response: generatedResponse,
+          response: deliveryResponse,
+          generated_images: generatedImages,
         }, null, 2), { headers: { 'Content-Type': 'application/json' } });
       }
       if (!deliver) {
@@ -2351,7 +2460,8 @@ export class CompanionBot extends McpAgent<Env> {
           request_id: requestId,
           continuity_event_id: claimData.event_id,
           wake_candidate_id: claimData.wake_candidate.id,
-          response: generatedResponse,
+          response: deliveryResponse,
+          generated_images: generatedImages,
         }, null, 2), { headers: { 'Content-Type': 'application/json' } });
       }
       if (!isKaiDeliveryEnabled(this.env)) {
@@ -2363,7 +2473,8 @@ export class CompanionBot extends McpAgent<Env> {
           request_id: requestId,
           continuity_event_id: claimData.event_id,
           wake_candidate_id: claimData.wake_candidate.id,
-          response: generatedResponse,
+          response: deliveryResponse,
+          generated_images: generatedImages,
         }, null, 2), { status: 409, headers: { 'Content-Type': 'application/json' } });
       }
 
@@ -2373,7 +2484,7 @@ export class CompanionBot extends McpAgent<Env> {
       const sentMessageIds: string[] = [];
       let sentWebhookUrl: string | undefined;
       if (targetWebhookUrl) {
-        for (const chunk of splitMessage(generatedResponse)) {
+        for (const chunk of splitMessage(deliveryResponse)) {
           const res = await fetch(`${targetWebhookUrl}?wait=true`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -2389,7 +2500,7 @@ export class CompanionBot extends McpAgent<Env> {
         }
         sentWebhookUrl = targetWebhookUrl;
       } else {
-        for (const chunk of splitMessage(generatedResponse)) {
+        for (const chunk of splitMessage(deliveryResponse)) {
           const result = await discordRequest(this.env, `/channels/${command.channel_id}/messages`, {
             method: 'POST',
             body: JSON.stringify({ content: chunk }),
@@ -2398,13 +2509,18 @@ export class CompanionBot extends McpAgent<Env> {
           sentMessageIds.push(result.id);
         }
       }
+      const imageDelivery = await sendKaiGeneratedImages(this.env, command, companion, generatedImages, targetWebhookUrl);
+      const sentImageMessageIds = imageDelivery.sentMessageIds;
+      if (imageDelivery.sentWebhookUrl) sentWebhookUrl = imageDelivery.sentWebhookUrl;
+      const generatedImageMetadata = kaiGeneratedImageMetadata(generatedImages, sentImageMessageIds);
+      const allSentMessageIds = [...sentMessageIds, ...sentImageMessageIds];
 
       const continuityResponse = await continuityRequest(this.env, `/wake-candidates/${encodeURIComponent(String(claimData.wake_candidate.id))}/response`, {
         method: 'POST',
         body: JSON.stringify({
           runner_id: runnerId,
-          content: generatedResponse,
-          external_message_id: sentMessageIds[sentMessageIds.length - 1] || `discord-dashboard-runner:${requestId}`,
+          content: deliveryResponse,
+          external_message_id: allSentMessageIds[allSentMessageIds.length - 1] || `discord-dashboard-runner:${requestId}`,
           author: { id: 'kaisoryth', name: companion.name },
           metadata: {
             runner: 'haven',
@@ -2414,12 +2530,15 @@ export class CompanionBot extends McpAgent<Env> {
             surface: 'discord',
             request_id: requestId,
             channel_id: command.channel_id,
-            sent_message_ids: sentMessageIds,
+            sent_message_ids: allSentMessageIds,
+            sent_text_message_ids: sentMessageIds,
+            sent_image_message_ids: sentImageMessageIds,
+            generated_images: generatedImageMetadata,
             tahl_state_present: Boolean(claimData.wake_context?.tahl_state && Object.keys(claimData.wake_context.tahl_state).length),
           },
         }),
       });
-      this.logActivity(command.companion_id, 'responded', command.channel_id, generatedResponse, companion.name, sentMessageIds[sentMessageIds.length - 1], sentWebhookUrl);
+      this.logActivity(command.companion_id, 'responded', command.channel_id, deliveryResponse, companion.name, allSentMessageIds[allSentMessageIds.length - 1], sentWebhookUrl);
       this.markResponded(command.channel_id, command.author?.id, command.message_id, 'haven-dashboard-runner');
       this.deleteCommand(requestId);
       return new Response(JSON.stringify({
@@ -2429,9 +2548,12 @@ export class CompanionBot extends McpAgent<Env> {
         continuity_event_id: claimData.event_id,
         wake_candidate_id: claimData.wake_candidate.id,
         runner_origin: origin,
-        sent_message_ids: sentMessageIds,
+        sent_message_ids: allSentMessageIds,
+        sent_text_message_ids: sentMessageIds,
+        sent_image_message_ids: sentImageMessageIds,
+        generated_images: generatedImageMetadata,
         continuity_response_event_id: continuityResponse?.event?.id || null,
-        response: generatedResponse,
+        response: deliveryResponse,
       }, null, 2), { headers: { 'Content-Type': 'application/json' } });
     } catch (error) {
       if (claimData?.wake_candidate?.id) {

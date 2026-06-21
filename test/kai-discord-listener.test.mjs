@@ -189,6 +189,25 @@ test('Kai Haven runner stays guarded behind explicit flags and wake leases', () 
   assert.match(source, /\/wake-candidates\/\$\{encodeURIComponent\(String\(claimData\.wake_candidate\.id\)\)\}\/response/);
 });
 
+test('Kai generated images are normalized, delivered to Discord, and logged with Continuity', () => {
+  assert.match(source, /const KAI_PUBLIC_MIND_ORIGIN = 'https:\/\/mind\.serythrae\.com'/);
+  assert.match(source, /function absoluteKaiImageUrl\(value: unknown\): string \| null/);
+  assert.match(source, /url\.startsWith\('\/img\/'\)\) return `\$\{KAI_PUBLIC_MIND_ORIGIN\}\$\{url\}`/);
+  assert.match(source, /function kaiGeneratedDiscordImages\(runnerResult: any\): KaiGeneratedDiscordImage\[\]/);
+  assert.match(source, /runnerResult\?\.image_generation\?\.images/);
+  assert.match(source, /const storedUrl = absoluteKaiImageUrl\(image\.stored_url\)/);
+  assert.match(source, /const sourceUrl = absoluteKaiImageUrl\(image\.url\)/);
+  assert.match(source, /async function sendKaiGeneratedImages/);
+  assert.match(source, /embeds: group/);
+  assert.match(source, /Discord image delivery error/);
+  assert.match(source, /const generatedImages = kaiGeneratedDiscordImages\(runnerResult\)/);
+  assert.match(source, /const deliveryResponse = generatedResponse \|\| \(generatedImages\.length \? KAI_IMAGE_FALLBACK_RESPONSE : ''\)/);
+  assert.match(source, /if \(!deliveryResponse && this\.env\.KAI_RUNNER_ROUTE === 'nexus' && runnerResult\?\.generated === false\)/);
+  assert.match(source, /const imageDelivery = await sendKaiGeneratedImages\(this\.env, command, companion, generatedImages, targetWebhookUrl\)/);
+  assert.match(source, /sent_image_message_ids: sentImageMessageIds/);
+  assert.match(source, /generated_images: generatedImageMetadata/);
+});
+
 test('Kai bypasses legacy Kairos trigger path and legacy send tools', () => {
   assert.match(source, /KAI_HAVEN_RUNNER_AUTORESPOND\?: string/);
   assert.match(source, /direct-haven-hard-mention/);
