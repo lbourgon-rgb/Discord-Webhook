@@ -637,8 +637,8 @@ function continuityResultEventId(result: any): string | null {
   return first?.event?.id ? String(first.event.id) : null;
 }
 
-async function findContinuityEventForCommand(env: Env, command: PendingCommand): Promise<any | null> {
-  const externalMessageId = command.message_id || command.id;
+async function findContinuityEventForCommand(env: Env, command: PendingCommand, externalMessageId?: string): Promise<any | null> {
+  const targetExternalMessageId = externalMessageId || command.message_id || command.id;
   const params = new URLSearchParams({
     source: 'discord',
     companion_id: normalizeCompanionId(command.companion_id),
@@ -649,7 +649,7 @@ async function findContinuityEventForCommand(env: Env, command: PendingCommand):
     const data = await continuityRequest(env, `/events?${params.toString()}`, { method: 'GET' });
     const events = Array.isArray(data?.events) ? data.events : [];
     return events.find((event: any) =>
-      String(event.external_message_id || '') === externalMessageId
+      String(event.external_message_id || '') === targetExternalMessageId
       && String(event.role || '') === 'human'
     ) || null;
   } catch {
@@ -659,15 +659,16 @@ async function findContinuityEventForCommand(env: Env, command: PendingCommand):
 
 async function createAndClaimWakeForCommand(env: Env, command: PendingCommand, runnerId: string, leaseSeconds: number = 300): Promise<{ event_id: string; wake_candidate: any; wake_context: any }> {
   const externalMessageId = command.message_id || command.id;
+  const runnerExternalMessageId = `${externalMessageId}:runner-wake:${command.id}`;
   const continuityContent = discordContinuityContent(command.content, command.attachments);
-  const existingEvent = await findContinuityEventForCommand(env, command);
+  const existingEvent = await findContinuityEventForCommand(env, command, runnerExternalMessageId);
   let eventId = existingEvent?.id ? String(existingEvent.id) : null;
   if (!eventId) {
     try {
       const eventResult = await postContinuityEvent(env, {
         companion_id: command.companion_id,
         conversation_id: `discord:${command.channel_id}`,
-        external_message_id: externalMessageId,
+        external_message_id: runnerExternalMessageId,
         role: 'human',
         author: {
           id: command.author?.id || command.author_id,
@@ -679,6 +680,7 @@ async function createAndClaimWakeForCommand(env: Env, command: PendingCommand, r
         metadata: {
           activity_type: 'runner_wake',
           request_id: command.id,
+          original_external_message_id: externalMessageId,
           channel_id: command.channel_id,
           channel_label: command.channel_label || null,
           trigger_reason: command.trigger_reason || null,
@@ -699,7 +701,7 @@ async function createAndClaimWakeForCommand(env: Env, command: PendingCommand, r
       eventId = continuityResultEventId(eventResult);
     } catch (error) {
       if (!String(error instanceof Error ? error.message : error).includes('UNIQUE constraint failed')) throw error;
-      const replayedEvent = await findContinuityEventForCommand(env, command);
+      const replayedEvent = await findContinuityEventForCommand(env, command, runnerExternalMessageId);
       eventId = replayedEvent?.id ? String(replayedEvent.id) : null;
       if (!eventId) throw error;
     }
