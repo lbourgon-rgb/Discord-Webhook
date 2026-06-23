@@ -166,7 +166,10 @@ test('Kai Haven runner stays guarded behind explicit flags and wake leases', () 
   assert.match(source, /KAI_HAVEN_RUNNER_DELIVERY_ENABLED\?: string/);
   assert.match(source, /action: z\.enum\(\["get", "respond", "dismiss", "run_with_haven", "run_with_lucien_chatgpt"\]\)/);
   assert.match(source, /createAndClaimWakeForCommand\(this\.env, command, activeRunnerId\)/);
-  assert.match(source, /findContinuityEventForCommand\(env, command\)/);
+  assert.match(source, /const runnerExternalMessageId = `\$\{externalMessageId\}:runner-wake:\$\{command\.id\}`/);
+  assert.match(source, /findContinuityEventForCommand\(env, command, runnerExternalMessageId\)/);
+  assert.match(source, /external_message_id: runnerExternalMessageId/);
+  assert.match(source, /original_external_message_id: externalMessageId/);
   assert.match(source, /UNIQUE constraint failed/);
   assert.match(source, /callKaiRunnerWithFallback\(this\.env/);
   assert.match(source, /KAI_HAVEN_RUNNER_DEFAULT_MODEL = 'z-ai\/glm-5\.2'/);
