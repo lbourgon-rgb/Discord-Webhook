@@ -836,6 +836,29 @@ function messageHasUsableContent(message: any): boolean {
   return Boolean(String(message?.content || '').trim()) || discordAttachmentMetadata(message?.attachments).length > 0;
 }
 
+function discordMessageId(message: any): string {
+  return String(message?.id || '');
+}
+
+function mergeDiscordMessages(...groups: any[][]): any[] {
+  const seen = new Set<string>();
+  const merged: any[] = [];
+  for (const group of groups) {
+    for (const message of Array.isArray(group) ? group : []) {
+      const id = discordMessageId(message);
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      merged.push(message);
+    }
+  }
+  return merged.sort((a, b) => {
+    const aTime = Date.parse(a?.timestamp || '') || 0;
+    const bTime = Date.parse(b?.timestamp || '') || 0;
+    if (aTime !== bTime) return aTime - bTime;
+    return discordMessageId(a).localeCompare(discordMessageId(b));
+  });
+}
+
 function mergeAttachmentMetadata(...groups: Array<Array<Record<string, unknown>>>): Array<Record<string, unknown>> {
   const seen = new Set<string>();
   const merged: Array<Record<string, unknown>> = [];
@@ -848,6 +871,57 @@ function mergeAttachmentMetadata(...groups: Array<Array<Record<string, unknown>>
     }
   }
   return merged;
+}
+
+function looksLikeDiscordImageGenerationRequest(content: string): boolean {
+  if (/\b(generate|create|draw|make|render)\b[\s\S]{0,120}\b(image|picture|art|illustration|photo)\b/i.test(content)) return true;
+  if (/\b(image|picture|art|illustration|photo)\b[\s\S]{0,120}\b(generate|create|draw|make|render)\b/i.test(content)) return true;
+  if (/\b(generate|create|draw|render)\b[\s\S]{0,120}\b(portrait|selfie|scene|wallpaper|avatar|icon|sticker|banner|card|poster|logo|character|sketch|painting|bouquet|flowers?|florals?|arrangement)\b/i.test(content)) return true;
+  if (/\bmake\s+(?:me|for me|us|for us)\b[\s\S]{0,120}\b(portrait|selfie|scene|wallpaper|avatar|icon|sticker|banner|card|poster|logo|character|sketch|painting|bouquet|flowers?|florals?|arrangement)\b/i.test(content)) return true;
+  return false;
+}
+
+function kaiRunnerImageGenerationSummary(runnerResult: any): Record<string, unknown> {
+  const imageGeneration = runnerResult?.image_generation && typeof runnerResult.image_generation === 'object'
+    ? runnerResult.image_generation
+    : null;
+  if (!imageGeneration) return { present: false };
+  const images = Array.isArray(imageGeneration.images) ? imageGeneration.images : [];
+  return {
+    present: true,
+    attempted: imageGeneration.attempted === true,
+    enabled: imageGeneration.enabled === true,
+    ok: imageGeneration.ok === true,
+    provider: typeof imageGeneration.provider === 'string' ? imageGeneration.provider : null,
+    model: typeof imageGeneration.model === 'string' ? imageGeneration.model : null,
+    prompt: typeof imageGeneration.prompt === 'string' ? imageGeneration.prompt.slice(0, 500) : null,
+    error: typeof imageGeneration.error === 'string' ? imageGeneration.error.slice(0, 500) : null,
+    image_count: images.length,
+    stored_urls: images.map((image: any) => typeof image?.stored_url === 'string' ? image.stored_url : null).filter(Boolean),
+    r2_keys: images.map((image: any) => typeof image?.r2_key === 'string' ? image.r2_key : null).filter(Boolean),
+  };
+}
+
+function kaiRunnerVisionSummary(runnerResult: any): Record<string, unknown> {
+  const vision = runnerResult?.vision && typeof runnerResult.vision === 'object' ? runnerResult.vision : null;
+  if (!vision) return { present: false };
+  const summaries = Array.isArray(vision.summaries) ? vision.summaries : [];
+  return {
+    present: true,
+    attempted: vision.attempted === true,
+    enabled: vision.enabled === true,
+    ok: vision.ok === true,
+    provider: typeof vision.provider === 'string' ? vision.provider : null,
+    model: typeof vision.model === 'string' ? vision.model : null,
+    error: typeof vision.error === 'string' ? vision.error.slice(0, 500) : null,
+    summary_count: summaries.length,
+    summaries: summaries.slice(0, 4).map((summary: any) => ({
+      attachment_id: typeof summary?.attachment_id === 'string' ? summary.attachment_id : null,
+      filename: typeof summary?.filename === 'string' ? summary.filename : null,
+      model: typeof summary?.model === 'string' ? summary.model : null,
+      summary: typeof summary?.summary === 'string' ? summary.summary.slice(0, 1000) : null,
+    })),
+  };
 }
 
 function isRequiredVelHardTag(cmd: Pick<PendingCommand, 'priority' | 'trigger_reason' | 'engagement'>): boolean {
@@ -2173,6 +2247,38 @@ export class CompanionBot extends McpAgent<Env> {
       .join('\n');
   }
 
+  private async recentContextForMessage(channelId: string, msg: any, batchMessages: any[]): Promise<string> {
+    const currentId = discordMessageId(msg);
+    const currentIndex = Array.isArray(batchMessages)
+      ? batchMessages.findIndex(message => discordMessageId(message) === currentId)
+      : -1;
+    const batchThroughCurrent = currentIndex >= 0 ? batchMessages.slice(0, currentIndex + 1) : [msg];
+    const referencedMessages = await this.referencedContextMessages(channelId, msg);
+    let beforeMessages: any[] = [];
+    if (channelId && currentId) {
+      try {
+        const result = await discordRequest(this.env, `/channels/${channelId}/messages?before=${encodeURIComponent(currentId)}&limit=20`);
+        beforeMessages = Array.isArray(result) ? result.reverse() : [];
+      } catch (error) {
+        console.warn(`[kai-context] failed to fetch recent Discord context before ${currentId}`, error);
+      }
+    }
+    return this.formatRecentContext(mergeDiscordMessages(beforeMessages, referencedMessages, batchThroughCurrent).slice(-28));
+  }
+
+  private async referencedContextMessages(channelId: string, msg: any): Promise<any[]> {
+    if (msg?.referenced_message) return [msg.referenced_message];
+    const referencedId = String(msg?.message_reference?.message_id || '').trim();
+    if (!channelId || !referencedId) return [];
+    try {
+      const referenced = await discordRequest(this.env, `/channels/${channelId}/messages/${encodeURIComponent(referencedId)}`);
+      return referenced && !referenced.error ? [referenced] : [];
+    } catch (error) {
+      console.warn(`[kai-context] failed to fetch referenced Discord message ${referencedId}`, error);
+      return [];
+    }
+  }
+
   private async recentImageAttachmentsBefore(channelId: string, msg: any, windowMs = 2 * 60 * 60 * 1000): Promise<Array<Record<string, unknown>>> {
     const authorId = String(msg?.author?.id || '');
     if (!channelId || !authorId || !msg?.id) return [];
@@ -2201,13 +2307,33 @@ export class CompanionBot extends McpAgent<Env> {
     }
   }
 
+  private async referencedImageAttachments(channelId: string, msg: any): Promise<Array<Record<string, unknown>>> {
+    const referencedMessages = await this.referencedContextMessages(channelId, msg);
+    const attachments: Array<Record<string, unknown>> = [];
+    for (const referenced of referencedMessages) {
+      for (const attachment of discordAttachmentMetadata(referenced?.attachments)) {
+        if (!isImageAttachmentMetadata(attachment)) continue;
+        attachments.push({
+          ...attachment,
+          source_message_id: referenced.id,
+          source: 'referenced-discord-message',
+        });
+      }
+    }
+    return attachments.slice(-4);
+  }
+
   private async kaiAttachmentsForMessage(channelId: string, msg: any): Promise<Array<Record<string, unknown>>> {
     const current = discordAttachmentMetadata(msg?.attachments);
     const text = String(msg?.content || '');
     const shouldLookBack = current.filter(isImageAttachmentMetadata).length === 0
       && /\b(images?|imgs?|pics?|pictures?|photos?|screenshots?|attachments?|attached|uploaded|uploads?|see this|look at this)\b/i.test(text);
     if (!shouldLookBack) return current;
-    return mergeAttachmentMetadata(current, await this.recentImageAttachmentsBefore(channelId, msg));
+    return mergeAttachmentMetadata(
+      current,
+      await this.referencedImageAttachments(channelId, msg),
+      await this.recentImageAttachmentsBefore(channelId, msg),
+    );
   }
 
   private cleanStale() {
@@ -2378,6 +2504,7 @@ export class CompanionBot extends McpAgent<Env> {
     try {
       const modelOverride = await this.getKaiModelOverride();
       claimData = await createAndClaimWakeForCommand(this.env, command, runnerId);
+      const imageRequestPrompt = looksLikeDiscordImageGenerationRequest(command.content) ? command.content : null;
       const runnerResult = await callKaiRunnerWithFallback(this.env, {
         envelope: kaiRunnerEnvelopeForCommand(command),
         wake_candidate_id: claimData.wake_candidate.id,
@@ -2392,8 +2519,24 @@ export class CompanionBot extends McpAgent<Env> {
         recent_context: command.recent_context,
         wake_context: claimData.wake_context,
         dry_run: true,
+        ...(imageRequestPrompt ? { generate_image: true, generate_image_prompt: imageRequestPrompt } : {}),
         ...(modelOverride ? { model: modelOverride } : {}),
       });
+      const runnerImageGeneration = kaiRunnerImageGenerationSummary(runnerResult);
+      const runnerVision = kaiRunnerVisionSummary(runnerResult);
+      await this.ctx.storage.put('kai:last_runner_result', {
+        request_id: requestId,
+        continuity_event_id: claimData.event_id,
+        wake_candidate_id: claimData.wake_candidate?.id || null,
+        message_id: command.message_id || null,
+        channel_id: command.channel_id,
+        generated: runnerResult?.generated === true,
+        response_present: Boolean(String(runnerResult?.response || '').trim()),
+        image_request_prompt: imageRequestPrompt,
+        image_generation: runnerImageGeneration,
+        vision: runnerVision,
+        updated_at: new Date().toISOString(),
+      }).catch(() => null);
       const generatedResponse = String(runnerResult.response || '').trim();
       const generatedImages = kaiGeneratedDiscordImages(runnerResult);
       const deliveryResponse = generatedResponse || (generatedImages.length ? KAI_IMAGE_FALLBACK_RESPONSE : '');
@@ -2536,10 +2679,26 @@ export class CompanionBot extends McpAgent<Env> {
             sent_text_message_ids: sentMessageIds,
             sent_image_message_ids: sentImageMessageIds,
             generated_images: generatedImageMetadata,
+            runner_image_generation: runnerImageGeneration,
+            runner_vision: runnerVision,
             tahl_state_present: Boolean(claimData.wake_context?.tahl_state && Object.keys(claimData.wake_context.tahl_state).length),
           },
         }),
       });
+      const lastRunnerResult = await this.ctx.storage.get('kai:last_runner_result').catch(() => null) as Record<string, unknown> | null;
+      await this.ctx.storage.put('kai:last_runner_result', {
+        ...(lastRunnerResult && typeof lastRunnerResult === 'object' ? lastRunnerResult : {}),
+        request_id: requestId,
+        continuity_event_id: claimData.event_id,
+        wake_candidate_id: claimData.wake_candidate?.id || null,
+        continuity_response_event_id: continuityResponse?.event?.id || null,
+        sent_message_ids: allSentMessageIds,
+        sent_text_message_ids: sentMessageIds,
+        sent_image_message_ids: sentImageMessageIds,
+        generated_images: generatedImageMetadata,
+        continuity_metadata_recorded: Boolean(continuityResponse?.event?.id || allSentMessageIds.length),
+        updated_at: new Date().toISOString(),
+      }).catch(() => null);
       this.logActivity(command.companion_id, 'responded', command.channel_id, deliveryResponse, companion.name, allSentMessageIds[allSentMessageIds.length - 1], sentWebhookUrl);
       this.markResponded(command.channel_id, command.author?.id, command.message_id, 'haven-dashboard-runner');
       this.deleteCommand(requestId);
@@ -3385,6 +3544,7 @@ export class CompanionBot extends McpAgent<Env> {
       const monitors = this.getMonitors();
       const watchChannels = monitors.map(m => m.channel_id);
       const lastPollDebug = await this.ctx.storage.get('last_poll_debug');
+      const lastKaiRunnerResult = await this.ctx.storage.get('kai:last_runner_result');
 
       // Fetch server list and channel names
       let servers: any[] = [];
@@ -3434,6 +3594,7 @@ export class CompanionBot extends McpAgent<Env> {
         monitors,
         servers,
         last_poll_debug: lastPollDebug || null,
+        last_kai_runner_result: lastKaiRunnerResult || null,
       }, null, 2), {
         headers: { 'Content-Type': 'application/json' },
       });
@@ -3657,7 +3818,11 @@ export class CompanionBot extends McpAgent<Env> {
           const isBot = !!msg.author?.bot;
 
           // Skip non-webhook bot messages (system messages from the bot itself)
-          if (isBot && !isWebhook) continue;
+          const axiomBotMayHardTagKai = isBot
+            && !isWebhook
+            && splitIds(this.env.AXIOM_DISCORD_USER_IDS || '1515127400491647076').includes(String(msg.author?.id || ''))
+            && containsHardKaiMention(String(msg.content || ''), this.env, normalizeMentionIds(msg.mentions));
+          if (isBot && !isWebhook && !axiomBotMayHardTagKai) continue;
           // Skip events with neither text nor attachment metadata.
           if (!messageHasUsableContent(msg)) continue;
           msg.content = String(msg.content || '');
@@ -3666,7 +3831,7 @@ export class CompanionBot extends McpAgent<Env> {
             !isWebhook
             && isKaiListenerEnabled(this.env)
             && isKaiSocialAutorespondEnabled(this.env)
-            && isKaiSocialHardTagChannel(this.env, channelId)
+            && (isKaiSocialHardTagChannel(this.env, channelId) || axiomBotMayHardTagKai)
           ) {
             const mentionIds = normalizeMentionIds(msg.mentions);
             const hardKaiMention = containsHardKaiMention(msg.content, this.env, mentionIds);
@@ -3674,7 +3839,7 @@ export class CompanionBot extends McpAgent<Env> {
               const companion = this.getCompanionById('kai');
               if (!companion) continue;
               const authorName = discordAuthorNameForKai(this.env, msg.author);
-              const recentContext = this.formatRecentContext(messages);
+              const recentContext = await this.recentContextForMessage(channelId, msg, messages);
               const attachments = await this.kaiAttachmentsForMessage(channelId, msg);
               const engagement: EngagementDecision = {
                 disposition: 'respond',
@@ -3743,7 +3908,7 @@ export class CompanionBot extends McpAgent<Env> {
               const companion = this.getCompanionById('kai');
               if (!companion) continue;
               const authorName = discordAuthorNameForKai(this.env, msg.author);
-              const recentContext = this.formatRecentContext(messages);
+              const recentContext = await this.recentContextForMessage(channelId, msg, messages);
               const attachments = await this.kaiAttachmentsForMessage(channelId, msg);
               const engagement: EngagementDecision = {
                 disposition: 'respond',
@@ -3870,7 +4035,7 @@ export class CompanionBot extends McpAgent<Env> {
 
           if (triggered.length === 0) continue;
 
-          const recentContext = this.formatRecentContext(messages);
+          const recentContext = await this.recentContextForMessage(channelId, msg, messages);
 
           // Resolve guild for entity permission checks
           let guildIdForEntity: string | null = null;

@@ -121,6 +121,14 @@ test('Axiom mentions join the companion-aware wake predicate without merging int
   assert.match(source, /engagement\.trigger_reason = hardCompanionMention[\s\S]+: 'companion-name-mention'/);
 });
 
+test('Axiom bot may hard-tag Kai for live supervised smoke tests without opening generic bot loops', () => {
+  assert.match(source, /const axiomBotMayHardTagKai = isBot/);
+  assert.match(source, /splitIds\(this\.env\.AXIOM_DISCORD_USER_IDS \|\| '1515127400491647076'\)\.includes\(String\(msg\.author\?\.id \|\| ''\)\)/);
+  assert.match(source, /containsHardKaiMention\(String\(msg\.content \|\| ''\), this\.env, normalizeMentionIds\(msg\.mentions\)\)/);
+  assert.match(source, /if \(isBot && !isWebhook && !axiomBotMayHardTagKai\) continue/);
+  assert.match(source, /&& \(isKaiSocialHardTagChannel\(this\.env, channelId\) \|\| axiomBotMayHardTagKai\)/);
+});
+
 test('Lucien uses ChatGPT runner hooks and stays out of Kai Haven runner', () => {
   assert.match(source, /LUCIEN_CHATGPT_RUNNER_ENABLED\?: string/);
   assert.match(source, /LUCIEN_CHATGPT_AUTORESPOND\?: string/);
@@ -209,6 +217,40 @@ test('Kai generated images are normalized, delivered to Discord, and logged with
   assert.match(source, /const imageDelivery = await sendKaiGeneratedImages\(this\.env, command, companion, generatedImages, targetWebhookUrl\)/);
   assert.match(source, /sent_image_message_ids: sentImageMessageIds/);
   assert.match(source, /generated_images: generatedImageMetadata/);
+  assert.match(source, /function looksLikeDiscordImageGenerationRequest\(content: string\): boolean/);
+  assert.match(source, /const imageRequestPrompt = looksLikeDiscordImageGenerationRequest\(command\.content\) \? command\.content : null/);
+  assert.match(source, /generate_image: true, generate_image_prompt: imageRequestPrompt/);
+  assert.match(source, /function kaiRunnerImageGenerationSummary\(runnerResult: any\): Record<string, unknown>/);
+  assert.match(source, /runner_image_generation: runnerImageGeneration/);
+  assert.match(source, /runner_vision: runnerVision/);
+  assert.match(source, /summaries: summaries\.slice\(0, 4\)\.map/);
+  assert.match(source, /summary: typeof summary\?\.summary === 'string' \? summary\.summary\.slice\(0, 1000\) : null/);
+  assert.match(source, /this\.ctx\.storage\.put\('kai:last_runner_result'/);
+  assert.match(source, /continuity_event_id: claimData\.event_id/);
+  assert.match(source, /wake_candidate_id: claimData\.wake_candidate\?\.id \|\| null/);
+  assert.match(source, /continuity_response_event_id: continuityResponse\?\.event\?\.id \|\| null/);
+  assert.match(source, /sent_message_ids: allSentMessageIds/);
+  assert.match(source, /continuity_metadata_recorded: Boolean\(continuityResponse\?\.event\?\.id \|\| allSentMessageIds\.length\)/);
+  assert.match(source, /last_kai_runner_result: lastKaiRunnerResult \|\| null/);
+});
+
+test('Kai runner recent context is fetched around the triggering Discord message', () => {
+  assert.match(source, /function mergeDiscordMessages\(\.\.\.groups: any\[\]\[\]\): any\[\]/);
+  assert.match(source, /private async recentContextForMessage\(channelId: string, msg: any, batchMessages: any\[\]\): Promise<string>/);
+  assert.match(source, /private async referencedContextMessages\(channelId: string, msg: any\): Promise<any\[\]>/);
+  assert.match(source, /if \(msg\?\.referenced_message\) return \[msg\.referenced_message\]/);
+  assert.match(source, /\/channels\/\$\{channelId\}\/messages\/\$\{encodeURIComponent\(referencedId\)\}/);
+  assert.match(source, /\/channels\/\$\{channelId\}\/messages\?before=\$\{encodeURIComponent\(currentId\)\}&limit=20/);
+  assert.match(source, /return this\.formatRecentContext\(mergeDiscordMessages\(beforeMessages, referencedMessages, batchThroughCurrent\)\.slice\(-28\)\)/);
+  assert.doesNotMatch(source, /const recentContext = this\.formatRecentContext\(messages\);/);
+  assert.match(source, /const recentContext = await this\.recentContextForMessage\(channelId, msg, messages\);/);
+});
+
+test('Kai OCR can use images from the replied-to Discord message', () => {
+  assert.match(source, /private async referencedImageAttachments\(channelId: string, msg: any\): Promise<Array<Record<string, unknown>>>/);
+  assert.match(source, /source: 'referenced-discord-message'/);
+  assert.match(source, /await this\.referencedImageAttachments\(channelId, msg\)/);
+  assert.match(source, /await this\.recentImageAttachmentsBefore\(channelId, msg\)/);
 });
 
 test('Kai bypasses legacy Kairos trigger path and legacy send tools', () => {
