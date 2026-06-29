@@ -894,6 +894,42 @@ function kaiRunnerVisionSummary(runnerResult: any): Record<string, unknown> {
   };
 }
 
+function kaiRunnerWorkspaceSummary(runnerResult: any): Record<string, unknown> {
+  const workspace = runnerResult?.workspace && typeof runnerResult.workspace === 'object'
+    ? runnerResult.workspace
+    : null;
+  if (!workspace) return { present: false };
+  return {
+    present: true,
+    requested: workspace.requested === true,
+    attempted: workspace.attempted === true,
+    ok: workspace.ok === true,
+    action: typeof workspace.action === 'string' ? workspace.action : null,
+    path: typeof workspace.path === 'string' ? workspace.path : null,
+    query: typeof workspace.query === 'string' ? workspace.query : null,
+    error: typeof workspace.error === 'string' ? workspace.error.slice(0, 500) : null,
+    agent_ok: workspace.agent?.ok === true,
+    r2: {
+      requested: workspace.r2?.requested === true,
+      configured: workspace.r2?.configured === true,
+      ok: workspace.r2?.ok === true,
+      key: typeof workspace.r2?.key === 'string' ? workspace.r2.key : null,
+      history_key: typeof workspace.r2?.history_key === 'string' ? workspace.r2.history_key : null,
+      error: typeof workspace.r2?.error === 'string' ? workspace.r2.error.slice(0, 500) : null,
+    },
+    github: {
+      requested: workspace.github?.requested === true,
+      configured: workspace.github?.configured === true,
+      ok: workspace.github?.ok === true,
+      repo: typeof workspace.github?.repo === 'string' ? workspace.github.repo : null,
+      path: typeof workspace.github?.path === 'string' ? workspace.github.path : null,
+      error: typeof workspace.github?.error === 'string'
+        ? workspace.github.error.slice(0, 500)
+        : (typeof workspace.github?.skipped_reason === 'string' ? workspace.github.skipped_reason.slice(0, 500) : null),
+    },
+  };
+}
+
 function kaiRunnerSource(runnerResult: any): string {
   return typeof runnerResult?.source === 'string' && runnerResult.source.trim()
     ? runnerResult.source.trim()
@@ -2512,6 +2548,7 @@ export class CompanionBot extends McpAgent<Env> {
       });
       const runnerImageGeneration = kaiRunnerImageGenerationSummary(runnerResult);
       const runnerVision = kaiRunnerVisionSummary(runnerResult);
+      const runnerWorkspace = kaiRunnerWorkspaceSummary(runnerResult);
       const runnerSource = kaiRunnerSource(runnerResult);
       await this.ctx.storage.put('kai:last_runner_result', {
         request_id: requestId,
@@ -2525,6 +2562,7 @@ export class CompanionBot extends McpAgent<Env> {
         image_request_prompt: imageRequestPrompt,
         image_generation: runnerImageGeneration,
         vision: runnerVision,
+        workspace: runnerWorkspace,
         updated_at: new Date().toISOString(),
       }).catch(() => null);
       const generatedResponse = String(runnerResult.response || '').trim();
@@ -2671,6 +2709,7 @@ export class CompanionBot extends McpAgent<Env> {
             generated_images: generatedImageMetadata,
             runner_image_generation: runnerImageGeneration,
             runner_vision: runnerVision,
+            runner_workspace: runnerWorkspace,
             tahl_state_present: Boolean(claimData.wake_context?.tahl_state && Object.keys(claimData.wake_context.tahl_state).length),
           },
         }),
@@ -2687,6 +2726,7 @@ export class CompanionBot extends McpAgent<Env> {
         sent_text_message_ids: sentMessageIds,
         sent_image_message_ids: sentImageMessageIds,
         generated_images: generatedImageMetadata,
+        workspace: runnerWorkspace,
         continuity_metadata_recorded: Boolean(continuityResponse?.event?.id || allSentMessageIds.length),
         updated_at: new Date().toISOString(),
       }).catch(() => null);
@@ -2704,6 +2744,7 @@ export class CompanionBot extends McpAgent<Env> {
         sent_text_message_ids: sentMessageIds,
         sent_image_message_ids: sentImageMessageIds,
         generated_images: generatedImageMetadata,
+        workspace: runnerWorkspace,
         continuity_response_event_id: continuityResponse?.event?.id || null,
         response: deliveryResponse,
       }, null, 2), { headers: { 'Content-Type': 'application/json' } });
@@ -4609,6 +4650,7 @@ export class CompanionBot extends McpAgent<Env> {
               });
 
               const runnerSource = kaiRunnerSource(runnerResult);
+              const runnerWorkspace = kaiRunnerWorkspaceSummary(runnerResult);
               const generatedResponse = String(runnerResult.response || '').trim();
               if (!generatedResponse && runnerResult?.should_respond === false) {
                 const social = runnerSocialDecision(runnerResult);
@@ -4665,6 +4707,7 @@ export class CompanionBot extends McpAgent<Env> {
                   continuity_event_id: claimData.event_id,
                   wake_candidate_id: claimData.wake_candidate.id,
                   response: generatedResponse,
+                  workspace: runnerWorkspace,
                 }, null, 2) }] };
               }
               if (!isKaiDeliveryEnabled(this.env)) {
@@ -4724,6 +4767,7 @@ export class CompanionBot extends McpAgent<Env> {
                     request_id: requestId,
                     channel_id: command.channel_id,
                     sent_message_ids: sentMessageIds,
+                    runner_workspace: runnerWorkspace,
                     tahl_state_present: Boolean(claimData.wake_context?.tahl_state && Object.keys(claimData.wake_context.tahl_state).length),
                   },
                 }),
@@ -4763,6 +4807,7 @@ export class CompanionBot extends McpAgent<Env> {
                 continuity_event_id: claimData.event_id,
                 wake_candidate_id: claimData.wake_candidate.id,
                 sent_message_ids: sentMessageIds,
+                workspace: runnerWorkspace,
                 continuity_response_event_id: continuityResponse?.event?.id || null,
               }, null, 2) }] };
             } catch (error) {

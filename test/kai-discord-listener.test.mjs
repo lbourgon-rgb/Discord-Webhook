@@ -245,6 +245,21 @@ test('Kai generated images are normalized, delivered to Discord, and logged with
   assert.match(source, /last_kai_runner_result: lastKaiRunnerResult \|\| null/);
 });
 
+test('Kai workspace results are stored and logged with Continuity metadata', () => {
+  assert.match(source, /function kaiRunnerWorkspaceSummary\(runnerResult: any\): Record<string, unknown>/);
+  assert.match(source, /const workspace = runnerResult\?\.workspace && typeof runnerResult\.workspace === 'object'/);
+  assert.match(source, /requested: workspace\.requested === true/);
+  assert.match(source, /attempted: workspace\.attempted === true/);
+  assert.match(source, /ok: workspace\.ok === true/);
+  assert.match(source, /agent_ok: workspace\.agent\?\.ok === true/);
+  assert.match(source, /r2: \{/);
+  assert.match(source, /key: typeof workspace\.r2\?\.key === 'string' \? workspace\.r2\.key : null/);
+  assert.match(source, /github: \{/);
+  assert.match(source, /const runnerWorkspace = kaiRunnerWorkspaceSummary\(runnerResult\)/);
+  assert.match(source, /workspace: runnerWorkspace/);
+  assert.match(source, /runner_workspace: runnerWorkspace/);
+});
+
 test('Kai runner recent context is fetched around the triggering Discord message', () => {
   assert.match(source, /function mergeDiscordMessages\(\.\.\.groups: any\[\]\[\]\): any\[\]/);
   assert.match(source, /private async recentContextForMessage\(channelId: string, msg: any, batchMessages: any\[\]\): Promise<string>/);
