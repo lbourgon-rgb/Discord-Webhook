@@ -46,7 +46,6 @@ VEL_DISCORD_USER_IDS = "1071497830222549064"
 # - WEBHOOK_URL: Discord webhook URL
 # - CONTINUITY_API_KEY: Optional bearer token for continuity-worker /events
 # - NEXUS_RUNNER_API_KEY: Shared bearer token for Discord -> Nexus runner calls
-# - HAVEN_RUNNER_API_KEY: Deprecated fallback secret name until NEXUS_RUNNER_API_KEY is set
 # - LUCIEN_WORKSPACE_AGENT_TRIGGER_ID: ChatGPT Workspace Agent trigger ID for Lucien
 # - LUCIEN_WORKSPACE_AGENT_ACCESS_TOKEN: Workspace Agent access token with trigger scope
 # - DISCORD_CLIENT_ID: OAuth2 application ID

@@ -37,8 +37,6 @@ interface Env {
   CONTINUITY?: Fetcher;
   NEXUS?: Fetcher;
   NEXUS_RUNNER_API_KEY?: string;
-  // Deprecated secret name retained temporarily until Cloudflare secrets are renamed.
-  HAVEN_RUNNER_API_KEY?: string;
   KAI_GUILD_ID?: string;
   KAI_CATEGORY_ID?: string;
   KAI_MENTION_USER_ID?: string;
@@ -541,7 +539,7 @@ async function continuityRequest(env: Env, path: string, init: RequestInit): Pro
 }
 
 function nexusRunnerApiKey(env: Env): string | undefined {
-  return env.NEXUS_RUNNER_API_KEY || env.HAVEN_RUNNER_API_KEY;
+  return env.NEXUS_RUNNER_API_KEY;
 }
 
 async function callNexusKaiRunner(env: Env, body: Record<string, unknown>): Promise<any> {
@@ -2961,7 +2959,7 @@ export class CompanionBot extends McpAgent<Env> {
       });
     }
 
-    const nexusPreviewMatch = url.pathname.match(/^\/api\/pending\/([^/]+)\/run-with-(?:nexus|haven)$/);
+    const nexusPreviewMatch = url.pathname.match(/^\/api\/pending\/([^/]+)\/run-with-nexus$/);
     if (nexusPreviewMatch && request.method === 'POST') {
       const body = await request.json().catch(() => ({})) as { deliver?: boolean };
       return this.runKaiNexusRunner(decodeURIComponent(nexusPreviewMatch[1]), body.deliver === true);
@@ -4326,9 +4324,9 @@ export class CompanionBot extends McpAgent<Env> {
 
     this.server.tool(
       "pending_commands",
-      "Manage pending Discord messages waiting for companion responses. Actions: get, respond, dismiss, run_with_nexus (supervised Kai runner preview/delivery; run_with_haven is a deprecated alias), run_with_lucien_chatgpt (queue Lucien's Workspace Agent).",
+      "Manage pending Discord messages waiting for companion responses. Actions: get, respond, dismiss, run_with_nexus (supervised Kai runner preview/delivery), run_with_lucien_chatgpt (queue Lucien's Workspace Agent).",
       {
-        action: z.enum(["get", "respond", "dismiss", "run_with_nexus", "run_with_haven", "run_with_lucien_chatgpt"]).describe("The action to perform"),
+        action: z.enum(["get", "respond", "dismiss", "run_with_nexus", "run_with_lucien_chatgpt"]).describe("The action to perform"),
         entity_id: z.string().optional().describe("Optional companion/entity ID. For 'get': filters pending commands. For 'respond'/'dismiss': validates it matches the command's companion_id."),
         requestId: z.string().optional().describe("(respond/dismiss/run_with_nexus/run_with_lucien_chatgpt) The request ID from pending_commands get"),
         response: z.string().optional().describe("(respond) The companion's response message"),
@@ -4549,8 +4547,7 @@ export class CompanionBot extends McpAgent<Env> {
             return { content: [{ type: "text" as const, text: `Response sent ${sendResult}.` }] };
           }
 
-          case "run_with_nexus":
-          case "run_with_haven": {
+          case "run_with_nexus": {
             if (!isKaiListenerEnabled(this.env)) {
               return { content: [{ type: "text" as const, text: "Kai runner/listener is installed but disabled. Set KAI_DISCORD_LISTENER_ENABLED=true when ready for supervised testing." }] };
             }

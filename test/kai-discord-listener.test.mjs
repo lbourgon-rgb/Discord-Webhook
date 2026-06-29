@@ -175,9 +175,10 @@ test('Manual trigger engagement includes the same debug shape as live poll decis
 
 test('Kai Nexus runner stays guarded behind explicit flags and wake leases', () => {
   assert.match(source, /NEXUS_RUNNER_API_KEY\?: string/);
-  assert.match(source, /HAVEN_RUNNER_API_KEY\?: string/);
-  assert.match(source, /return env\.NEXUS_RUNNER_API_KEY \|\| env\.HAVEN_RUNNER_API_KEY/);
-  assert.match(source, /action: z\.enum\(\["get", "respond", "dismiss", "run_with_nexus", "run_with_haven", "run_with_lucien_chatgpt"\]\)/);
+  assert.doesNotMatch(source, /HAVEN_RUNNER_API_KEY/);
+  assert.match(source, /return env\.NEXUS_RUNNER_API_KEY/);
+  assert.match(source, /action: z\.enum\(\["get", "respond", "dismiss", "run_with_nexus", "run_with_lucien_chatgpt"\]\)/);
+  assert.doesNotMatch(source, /run_with_haven/);
   assert.match(source, /createAndClaimWakeForCommand\(this\.env, command, activeRunnerId\)/);
   assert.match(source, /const runnerExternalMessageId = `\$\{externalMessageId\}:runner-wake:\$\{command\.id\}`/);
   assert.match(source, /findContinuityEventForCommand\(env, command, runnerExternalMessageId\)/);
