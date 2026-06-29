@@ -198,7 +198,10 @@ test('Kai Nexus runner stays guarded behind explicit flags and wake leases', () 
   assert.match(source, /function isKaiDeliveryEnabled\(env: Env\): boolean/);
   assert.match(source, /return env\.KAI_DISCORD_DELIVERY_ENABLED === 'true'/);
   assert.match(source, /!isKaiDeliveryEnabled\(this\.env\)/);
-  assert.match(source, /delivery_path: 'discord-continuity-tahl-nexus-nesteq-discord'/);
+  assert.match(source, /function kaiRunnerSource\(runnerResult: any\): string/);
+  assert.match(source, /function kaiRunnerDeliveryPath\(runnerSource: string\): string/);
+  assert.match(source, /discord-continuity-tahl-nexus-serythrae-gw-nesteq-discord/);
+  assert.match(source, /delivery_path: kaiRunnerDeliveryPath\(runnerSource\)/);
   assert.match(source, /runner_origin: origin/);
   assert.match(source, /tahl_state_present: Boolean\(claimData\.wake_context\?\.tahl_state/g);
   assert.doesNotMatch(source, /skipContinuity: true/);
@@ -227,6 +230,8 @@ test('Kai generated images are normalized, delivered to Discord, and logged with
   assert.match(source, /const imageRequestPrompt = looksLikeDiscordImageGenerationRequest\(command\.content\) \? command\.content : null/);
   assert.match(source, /generate_image: true, generate_image_prompt: imageRequestPrompt/);
   assert.match(source, /function kaiRunnerImageGenerationSummary\(runnerResult: any\): Record<string, unknown>/);
+  assert.match(source, /const runnerSource = kaiRunnerSource\(runnerResult\)/);
+  assert.match(source, /runner_source: runnerSource/);
   assert.match(source, /runner_image_generation: runnerImageGeneration/);
   assert.match(source, /runner_vision: runnerVision/);
   assert.match(source, /summaries: summaries\.slice\(0, 4\)\.map/);

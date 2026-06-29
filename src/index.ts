@@ -894,6 +894,18 @@ function kaiRunnerVisionSummary(runnerResult: any): Record<string, unknown> {
   };
 }
 
+function kaiRunnerSource(runnerResult: any): string {
+  return typeof runnerResult?.source === 'string' && runnerResult.source.trim()
+    ? runnerResult.source.trim()
+    : 'nexus-gateway';
+}
+
+function kaiRunnerDeliveryPath(runnerSource: string): string {
+  return runnerSource === 'serythrae-gw'
+    ? 'discord-continuity-tahl-nexus-serythrae-gw-nesteq-discord'
+    : 'discord-continuity-tahl-nexus-nesteq-discord';
+}
+
 function isRequiredVelHardTag(cmd: Pick<PendingCommand, 'priority' | 'trigger_reason' | 'engagement'>): boolean {
   return cmd.priority === 'high'
     && String(cmd.trigger_reason || '').startsWith('vel-hard-mention-required')
@@ -2500,12 +2512,14 @@ export class CompanionBot extends McpAgent<Env> {
       });
       const runnerImageGeneration = kaiRunnerImageGenerationSummary(runnerResult);
       const runnerVision = kaiRunnerVisionSummary(runnerResult);
+      const runnerSource = kaiRunnerSource(runnerResult);
       await this.ctx.storage.put('kai:last_runner_result', {
         request_id: requestId,
         continuity_event_id: claimData.event_id,
         wake_candidate_id: claimData.wake_candidate?.id || null,
         message_id: command.message_id || null,
         channel_id: command.channel_id,
+        runner_source: runnerSource,
         generated: runnerResult?.generated === true,
         response_present: Boolean(String(runnerResult?.response || '').trim()),
         image_request_prompt: imageRequestPrompt,
@@ -2644,9 +2658,9 @@ export class CompanionBot extends McpAgent<Env> {
           external_message_id: allSentMessageIds[allSentMessageIds.length - 1] || `discord-dashboard-runner:${requestId}`,
           author: { id: 'kaisoryth', name: companion.name },
           metadata: {
-            runner: 'nexus',
+            runner: runnerSource,
             runner_origin: origin,
-            delivery_path: 'discord-continuity-tahl-nexus-nesteq-discord',
+            delivery_path: kaiRunnerDeliveryPath(runnerSource),
             delivery_status: 'delivered',
             surface: 'discord',
             request_id: requestId,
@@ -2668,6 +2682,7 @@ export class CompanionBot extends McpAgent<Env> {
         continuity_event_id: claimData.event_id,
         wake_candidate_id: claimData.wake_candidate?.id || null,
         continuity_response_event_id: continuityResponse?.event?.id || null,
+        runner_source: runnerSource,
         sent_message_ids: allSentMessageIds,
         sent_text_message_ids: sentMessageIds,
         sent_image_message_ids: sentImageMessageIds,
@@ -4593,6 +4608,7 @@ export class CompanionBot extends McpAgent<Env> {
                 dry_run: true,
               });
 
+              const runnerSource = kaiRunnerSource(runnerResult);
               const generatedResponse = String(runnerResult.response || '').trim();
               if (!generatedResponse && runnerResult?.should_respond === false) {
                 const social = runnerSocialDecision(runnerResult);
@@ -4701,7 +4717,8 @@ export class CompanionBot extends McpAgent<Env> {
                   external_message_id: sentMessageIds[sentMessageIds.length - 1] || `discord-runner:${requestId}`,
                   author: { id: 'kaisoryth', name: companion.name },
                   metadata: {
-                    runner: 'nexus',
+                    runner: runnerSource,
+                    delivery_path: kaiRunnerDeliveryPath(runnerSource),
                     delivery_status: 'delivered',
                     surface: 'discord',
                     request_id: requestId,
