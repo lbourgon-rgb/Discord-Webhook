@@ -129,6 +129,11 @@ test('Axiom bot may hard-tag Kai for live supervised smoke tests without opening
   assert.match(source, /&& \(isKaiSocialHardTagChannel\(this\.env, channelId\) \|\| axiomBotMayHardTagKai\)/);
 });
 
+test('Kai social hard-tag bootstrap upgrades existing watch-channel monitor rows', () => {
+  assert.match(source, /config\.addedBy === 'KAI_SOCIAL_HARD_TAG_CHANNEL_IDS'/);
+  assert.match(source, /UPDATE discord_monitors SET response_mode = \?, respond_enabled = 1, added_by = \? WHERE channel_id = \?/);
+});
+
 test('Lucien uses ChatGPT runner hooks and stays out of Kai Haven runner', () => {
   assert.match(source, /LUCIEN_CHATGPT_RUNNER_ENABLED\?: string/);
   assert.match(source, /LUCIEN_CHATGPT_AUTORESPOND\?: string/);

@@ -1410,6 +1410,12 @@ export class CompanionBot extends McpAgent<Env> {
         `UPDATE discord_monitors SET response_mode = ?, respond_enabled = 1 WHERE channel_id = ? AND added_by = ?`,
         config.responseMode, config.channelId, config.addedBy
       );
+      if (config.addedBy === 'KAI_SOCIAL_HARD_TAG_CHANNEL_IDS') {
+        this.ctx.storage.sql.exec(
+          `UPDATE discord_monitors SET response_mode = ?, respond_enabled = 1, added_by = ? WHERE channel_id = ?`,
+          config.responseMode, config.addedBy, config.channelId
+        );
+      }
     }
   }
 
