@@ -134,7 +134,7 @@ test('Kai social hard-tag bootstrap upgrades existing watch-channel monitor rows
   assert.match(source, /UPDATE discord_monitors SET response_mode = \?, respond_enabled = 1, added_by = \? WHERE channel_id = \?/);
 });
 
-test('Lucien uses ChatGPT runner hooks and stays out of Kai Haven runner', () => {
+test('Lucien uses ChatGPT runner hooks and stays out of Kai Nexus runner', () => {
   assert.match(source, /LUCIEN_CHATGPT_RUNNER_ENABLED\?: string/);
   assert.match(source, /LUCIEN_CHATGPT_AUTORESPOND\?: string/);
   assert.match(source, /LUCIEN_CHATGPT_DELIVERY_ENABLED\?: string/);
@@ -143,7 +143,7 @@ test('Lucien uses ChatGPT runner hooks and stays out of Kai Haven runner', () =>
   assert.match(source, /const runnerId = 'chatgpt-workspace-agent:lucien'/);
   assert.match(source, /lucien_discord_reply/);
   assert.match(source, /run_with_lucien_chatgpt/);
-  assert.match(source, /run_with_haven is Kai-only in this rollout/);
+  assert.match(source, /run_with_nexus is Kai-only in this rollout/);
   assert.match(source, /run_with_lucien_chatgpt is Lucien-only/);
 });
 
@@ -173,11 +173,11 @@ test('Manual trigger engagement includes the same debug shape as live poll decis
   assert.match(source, /community_greeting: isCommunityGreeting\(body\.content\)/);
 });
 
-test('Kai Haven runner stays guarded behind explicit flags and wake leases', () => {
+test('Kai Nexus runner stays guarded behind explicit flags and wake leases', () => {
+  assert.match(source, /NEXUS_RUNNER_API_KEY\?: string/);
   assert.match(source, /HAVEN_RUNNER_API_KEY\?: string/);
-  assert.match(source, /KAI_HAVEN_RUNNER_ENABLED\?: string/);
-  assert.match(source, /KAI_HAVEN_RUNNER_DELIVERY_ENABLED\?: string/);
-  assert.match(source, /action: z\.enum\(\["get", "respond", "dismiss", "run_with_haven", "run_with_lucien_chatgpt"\]\)/);
+  assert.match(source, /return env\.NEXUS_RUNNER_API_KEY \|\| env\.HAVEN_RUNNER_API_KEY/);
+  assert.match(source, /action: z\.enum\(\["get", "respond", "dismiss", "run_with_nexus", "run_with_haven", "run_with_lucien_chatgpt"\]\)/);
   assert.match(source, /createAndClaimWakeForCommand\(this\.env, command, activeRunnerId\)/);
   assert.match(source, /const runnerExternalMessageId = `\$\{externalMessageId\}:runner-wake:\$\{command\.id\}`/);
   assert.match(source, /findContinuityEventForCommand\(env, command, runnerExternalMessageId\)/);
@@ -185,9 +185,9 @@ test('Kai Haven runner stays guarded behind explicit flags and wake leases', () 
   assert.match(source, /original_external_message_id: externalMessageId/);
   assert.match(source, /UNIQUE constraint failed/);
   assert.match(source, /callKaiRunnerWithFallback\(this\.env/);
-  assert.match(source, /KAI_HAVEN_RUNNER_DEFAULT_MODEL = 'z-ai\/glm-5\.2'/);
-  assert.match(source, /KAI_HAVEN_RUNNER_FALLBACK_MODELS/);
-  assert.match(source, /KAI_HAVEN_RUNNER_FALLBACK_MODELS = \['deepseek\/deepseek-v4-flash'\]/);
+  assert.match(source, /KAI_NEXUS_RUNNER_DEFAULT_MODEL = 'z-ai\/glm-5\.2'/);
+  assert.match(source, /KAI_NEXUS_RUNNER_FALLBACK_MODELS/);
+  assert.match(source, /KAI_NEXUS_RUNNER_FALLBACK_MODELS = \['deepseek\/deepseek-v4-flash'\]/);
   assert.doesNotMatch(source, /openai\/gpt-5-mini/);
   assert.match(source, /currently at capacity\|overloaded\|rate limit\|temporarily unavailable\|returned no choices\|timed out/);
   assert.match(source, /data\.generated === false/);
@@ -195,9 +195,9 @@ test('Kai Haven runner stays guarded behind explicit flags and wake leases', () 
   assert.match(source, /wake_context: claimData\.wake_context/);
   assert.match(source, /dry_run: true/);
   assert.match(source, /function isKaiDeliveryEnabled\(env: Env\): boolean/);
-  assert.match(source, /KAI_DISCORD_DELIVERY_ENABLED !== undefined[\s\S]+KAI_HAVEN_RUNNER_DELIVERY_ENABLED === 'true'/);
+  assert.match(source, /return env\.KAI_DISCORD_DELIVERY_ENABLED === 'true'/);
   assert.match(source, /!isKaiDeliveryEnabled\(this\.env\)/);
-  assert.match(source, /delivery_path: 'discord-continuity-tahl-haven-serythrae-discord'/);
+  assert.match(source, /delivery_path: 'discord-continuity-tahl-nexus-nesteq-discord'/);
   assert.match(source, /runner_origin: origin/);
   assert.match(source, /tahl_state_present: Boolean\(claimData\.wake_context\?\.tahl_state/g);
   assert.doesNotMatch(source, /skipContinuity: true/);
@@ -259,9 +259,8 @@ test('Kai OCR can use images from the replied-to Discord message', () => {
 });
 
 test('Kai bypasses legacy Kairos trigger path and legacy send tools', () => {
-  assert.match(source, /KAI_HAVEN_RUNNER_AUTORESPOND\?: string/);
-  assert.match(source, /direct-haven-hard-mention/);
-  assert.match(source, /runHavenRunnerFromDashboard\(command\.id, true, 'autorespond'\)/);
+  assert.match(source, /direct-nexus-hard-mention/);
+  assert.match(source, /runKaiNexusRunner\(command\.id, true, 'autorespond'\)/);
   assert.match(source, /Cron: skipped legacy Kai path/);
   assert.match(source, /Legacy pending_commands respond is disabled for Kai/);
   assert.match(source, /Legacy companion send is disabled for Kai/);

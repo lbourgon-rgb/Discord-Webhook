@@ -524,42 +524,42 @@ export function renderDashboard(baseUrl: string, clientId: string): string {
             <p class="text-xs text-res-muted">from \${p.author?.username || 'unknown'} in #\${p.channel_id}</p>
             \${p.companion_id === 'kai' ? \`
               <div class="flex flex-wrap gap-2 mt-3">
-                <button onclick="runHavenKai('\${p.id}', false)" class="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-xs text-white transition-colors">Haven preview</button>
-                <button onclick="runHavenKai('\${p.id}', true)" class="px-3 py-1.5 rounded-lg bg-res-accent/20 hover:bg-res-accent/30 border border-res-accent/30 text-xs text-res-accent transition-colors">Post from Haven</button>
+                <button onclick="runKaiNexus('\${p.id}', false)" class="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-xs text-white transition-colors">Nexus preview</button>
+                <button onclick="runKaiNexus('\${p.id}', true)" class="px-3 py-1.5 rounded-lg bg-res-accent/20 hover:bg-res-accent/30 border border-res-accent/30 text-xs text-res-accent transition-colors">Post from Nexus</button>
               </div>
-              <pre id="havenResult-\${p.id}" class="hidden mt-3 p-3 rounded-lg bg-black/30 border border-white/10 text-xs text-gray-200 whitespace-pre-wrap overflow-x-auto"></pre>
+              <pre id="nexusResult-\${p.id}" class="hidden mt-3 p-3 rounded-lg bg-black/30 border border-white/10 text-xs text-gray-200 whitespace-pre-wrap overflow-x-auto"></pre>
             \` : ''}
           </div>
         \`}).join('');
       } catch(e){}
     }
 
-    async function runHavenKai(requestId, deliver) {
-      const out = document.getElementById('havenResult-' + requestId);
+    async function runKaiNexus(requestId, deliver) {
+      const out = document.getElementById('nexusResult-' + requestId);
       if (out) {
         out.classList.remove('hidden');
-        out.textContent = deliver ? 'Generating and posting from Haven...' : 'Generating Haven preview...';
+        out.textContent = deliver ? 'Generating and posting from Nexus...' : 'Generating Nexus preview...';
       }
-      if (deliver && !confirm('Post this Haven-generated Kai response into Discord?')) {
+      if (deliver && !confirm('Post this Nexus-generated Kai response into Discord?')) {
         if (out) out.textContent = 'Post cancelled.';
         return;
       }
       try {
-        const res = await fetch(API + '/pending/' + encodeURIComponent(requestId) + '/run-with-haven', {
+        const res = await fetch(API + '/pending/' + encodeURIComponent(requestId) + '/run-with-nexus', {
           method: 'POST',
           headers: getHeaders(),
           body: JSON.stringify({ deliver })
         });
         const data = await res.json();
         if (out) out.textContent = JSON.stringify(data, null, 2);
-        showToast(data.ok ? (deliver ? 'Posted from Haven' : 'Haven preview ready') : (data.error || data.blocked_reason || 'Haven runner blocked'));
+        showToast(data.ok ? (deliver ? 'Posted from Nexus' : 'Nexus preview ready') : (data.error || data.blocked_reason || 'Nexus runner blocked'));
         if (data.ok && deliver) {
           loadPending();
           loadStatus();
         }
       } catch (e) {
-        if (out) out.textContent = 'Haven runner failed: ' + e.message;
-        showToast('Haven runner failed');
+        if (out) out.textContent = 'Nexus runner failed: ' + e.message;
+        showToast('Nexus runner failed');
       }
     }
 

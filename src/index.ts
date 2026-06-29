@@ -19,8 +19,8 @@ import { renderDashboard, renderRegisterPage } from "./dashboard";
 import { triggerLucienWorkspaceAgent } from "./lucien-chatgpt-runner";
 
 const DISCORD_API = 'https://discord.com/api/v10';
-const KAI_HAVEN_RUNNER_DEFAULT_MODEL = 'z-ai/glm-5.2';
-const KAI_HAVEN_RUNNER_FALLBACK_MODELS = ['deepseek/deepseek-v4-flash'];
+const KAI_NEXUS_RUNNER_DEFAULT_MODEL = 'z-ai/glm-5.2';
+const KAI_NEXUS_RUNNER_FALLBACK_MODELS = ['deepseek/deepseek-v4-flash'];
 const DEFAULT_KAI_DISCORD_USER_ID = '1447789482253484175';
 const KAI_MODEL_OVERRIDE_STORAGE_KEY = 'kai:model_override';
 const KAI_MODEL_ID_PATTERN = /^[a-z0-9][a-z0-9._:/-]{1,119}$/i;
@@ -35,13 +35,10 @@ interface Env {
   CONTINUITY_WORKER_URL?: string;
   CONTINUITY_API_KEY?: string;
   CONTINUITY?: Fetcher;
-  HAVEN?: Fetcher;
   NEXUS?: Fetcher;
-  HAVEN_RUNNER_URL?: string;
+  NEXUS_RUNNER_API_KEY?: string;
+  // Deprecated secret name retained temporarily until Cloudflare secrets are renamed.
   HAVEN_RUNNER_API_KEY?: string;
-  KAI_HAVEN_RUNNER_ENABLED?: string;
-  KAI_HAVEN_RUNNER_DELIVERY_ENABLED?: string;
-  KAI_HAVEN_RUNNER_AUTORESPOND?: string;
   KAI_GUILD_ID?: string;
   KAI_CATEGORY_ID?: string;
   KAI_MENTION_USER_ID?: string;
@@ -164,21 +161,15 @@ function getKaiDiscordMentionIds(env: Env): string[] {
 }
 
 function isKaiListenerEnabled(env: Env): boolean {
-  return env.KAI_DISCORD_LISTENER_ENABLED !== undefined
-    ? env.KAI_DISCORD_LISTENER_ENABLED === 'true'
-    : env.KAI_HAVEN_RUNNER_ENABLED === 'true';
+  return env.KAI_DISCORD_LISTENER_ENABLED === 'true';
 }
 
 function isKaiDeliveryEnabled(env: Env): boolean {
-  return env.KAI_DISCORD_DELIVERY_ENABLED !== undefined
-    ? env.KAI_DISCORD_DELIVERY_ENABLED === 'true'
-    : env.KAI_HAVEN_RUNNER_DELIVERY_ENABLED === 'true';
+  return env.KAI_DISCORD_DELIVERY_ENABLED === 'true';
 }
 
 function isKaiAutorespondEnabled(env: Env): boolean {
-  return env.KAI_DISCORD_AUTORESPOND !== undefined
-    ? env.KAI_DISCORD_AUTORESPOND === 'true'
-    : env.KAI_HAVEN_RUNNER_AUTORESPOND === 'true';
+  return env.KAI_DISCORD_AUTORESPOND === 'true';
 }
 
 function getKaiListenChannelIds(env: Env): string[] {
@@ -549,34 +540,16 @@ async function continuityRequest(env: Env, path: string, init: RequestInit): Pro
   return data;
 }
 
-async function callHavenKaiRunner(env: Env, body: Record<string, unknown>): Promise<any> {
-  if (!env.HAVEN_RUNNER_API_KEY) throw new Error('HAVEN_RUNNER_API_KEY is not configured');
-  const headers = {
-    'Content-Type': 'application/json',
-    'Authorization': `Bearer ${env.HAVEN_RUNNER_API_KEY}`,
-  };
-  const init: RequestInit = {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
-  };
-  const response = env.HAVEN
-    ? await env.HAVEN.fetch(new Request('https://haven.internal/api/runner/kai/respond', init))
-    : await fetch(env.HAVEN_RUNNER_URL || 'https://haven.lbourgon.workers.dev/api/runner/kai/respond', init);
-  const text = await response.text();
-  let data: any = text;
-  try {
-    data = JSON.parse(text);
-  } catch {}
-  if (!response.ok) throw new Error(`haven runner ${response.status}: ${text.slice(0, 400)}`);
-  return data;
+function nexusRunnerApiKey(env: Env): string | undefined {
+  return env.NEXUS_RUNNER_API_KEY || env.HAVEN_RUNNER_API_KEY;
 }
 
 async function callNexusKaiRunner(env: Env, body: Record<string, unknown>): Promise<any> {
   if (!env.NEXUS && !env.KAI_NEXUS_URL) throw new Error('KAI_NEXUS_URL or NEXUS service binding is not configured');
   const base = (env.NEXUS ? 'https://nexus.internal' : env.KAI_NEXUS_URL || 'https://nexus.internal').replace(/\/+$/, '');
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (env.HAVEN_RUNNER_API_KEY) headers.Authorization = `Bearer ${env.HAVEN_RUNNER_API_KEY}`;
+  const apiKey = nexusRunnerApiKey(env);
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
   const request = new Request(`${base}/api/kaisoryth/run`, {
     method: 'POST',
     headers,
@@ -600,8 +573,7 @@ async function callNexusKaiRunner(env: Env, body: Record<string, unknown>): Prom
 }
 
 async function callKaiRunner(env: Env, body: Record<string, unknown>): Promise<any> {
-  if (env.KAI_RUNNER_ROUTE === 'nexus') return callNexusKaiRunner(env, body);
-  return callHavenKaiRunner(env, body);
+  return callNexusKaiRunner(env, body);
 }
 
 function isTransientKaiRunnerModelError(error: unknown): boolean {
@@ -612,8 +584,8 @@ function isTransientKaiRunnerModelError(error: unknown): boolean {
 async function callKaiRunnerWithFallback(env: Env, body: Record<string, unknown>): Promise<any> {
   const attempted = new Set<string>();
   const models = [
-    body.model ? String(body.model) : (env.KAI_DEFAULT_MODEL || KAI_HAVEN_RUNNER_DEFAULT_MODEL),
-    ...(env.KAI_BACKUP_MODEL ? [env.KAI_BACKUP_MODEL] : KAI_HAVEN_RUNNER_FALLBACK_MODELS),
+    body.model ? String(body.model) : (env.KAI_DEFAULT_MODEL || KAI_NEXUS_RUNNER_DEFAULT_MODEL),
+    ...(env.KAI_BACKUP_MODEL ? [env.KAI_BACKUP_MODEL] : KAI_NEXUS_RUNNER_FALLBACK_MODELS),
   ].filter(Boolean);
   let lastError: unknown = null;
 
@@ -2472,18 +2444,18 @@ export class CompanionBot extends McpAgent<Env> {
 
   private async kaiModelState(): Promise<Record<string, unknown>> {
     const modelOverride = await this.getKaiModelOverride();
-    const defaultModel = this.env.KAI_DEFAULT_MODEL || KAI_HAVEN_RUNNER_DEFAULT_MODEL;
+    const defaultModel = this.env.KAI_DEFAULT_MODEL || KAI_NEXUS_RUNNER_DEFAULT_MODEL;
     return {
       companion_id: 'kai',
       model_override: modelOverride,
       default_model: defaultModel,
-      backup_model: this.env.KAI_BACKUP_MODEL || KAI_HAVEN_RUNNER_FALLBACK_MODELS[0],
+      backup_model: this.env.KAI_BACKUP_MODEL || KAI_NEXUS_RUNNER_FALLBACK_MODELS[0],
       active_model: modelOverride || defaultModel,
-      runner_route: this.env.KAI_RUNNER_ROUTE || 'haven',
+      runner_route: 'nexus',
     };
   }
 
-  private async runHavenRunnerFromDashboard(requestId: string, deliver: boolean, origin: 'dashboard' | 'autorespond' = 'dashboard'): Promise<Response> {
+  private async runKaiNexusRunner(requestId: string, deliver: boolean, origin: 'dashboard' | 'autorespond' = 'dashboard'): Promise<Response> {
     this.ensureTable();
     if (!isKaiListenerEnabled(this.env)) {
       return new Response(JSON.stringify({
@@ -2499,13 +2471,13 @@ export class CompanionBot extends McpAgent<Env> {
       });
     }
     if (normalizeDiscordCompanionId(command.companion_id) !== 'kai') {
-      return new Response(JSON.stringify({ ok: false, error: 'Haven preview is Kai-only in this rollout.' }), {
+      return new Response(JSON.stringify({ ok: false, error: 'Nexus runner is Kai-only in this rollout.' }), {
         status: 400,
         headers: { 'Content-Type': 'application/json' },
       });
     }
 
-    const runnerId = `haven-runner:kai-${origin}`;
+    const runnerId = `nexus-runner:kai-${origin}`;
     let claimData: { event_id: string; wake_candidate: any; wake_context: any } | null = null;
     try {
       const modelOverride = await this.getKaiModelOverride();
@@ -2674,9 +2646,9 @@ export class CompanionBot extends McpAgent<Env> {
           external_message_id: allSentMessageIds[allSentMessageIds.length - 1] || `discord-dashboard-runner:${requestId}`,
           author: { id: 'kaisoryth', name: companion.name },
           metadata: {
-            runner: 'haven',
+            runner: 'nexus',
             runner_origin: origin,
-            delivery_path: 'discord-continuity-tahl-haven-serythrae-discord',
+            delivery_path: 'discord-continuity-tahl-nexus-nesteq-discord',
             delivery_status: 'delivered',
             surface: 'discord',
             request_id: requestId,
@@ -2706,7 +2678,7 @@ export class CompanionBot extends McpAgent<Env> {
         updated_at: new Date().toISOString(),
       }).catch(() => null);
       this.logActivity(command.companion_id, 'responded', command.channel_id, deliveryResponse, companion.name, allSentMessageIds[allSentMessageIds.length - 1], sentWebhookUrl);
-      this.markResponded(command.channel_id, command.author?.id, command.message_id, 'haven-dashboard-runner');
+      this.markResponded(command.channel_id, command.author?.id, command.message_id, 'nexus-dashboard-runner');
       this.deleteCommand(requestId);
       return new Response(JSON.stringify({
         ok: true,
@@ -2989,10 +2961,10 @@ export class CompanionBot extends McpAgent<Env> {
       });
     }
 
-    const havenPreviewMatch = url.pathname.match(/^\/api\/pending\/([^/]+)\/run-with-haven$/);
-    if (havenPreviewMatch && request.method === 'POST') {
+    const nexusPreviewMatch = url.pathname.match(/^\/api\/pending\/([^/]+)\/run-with-(?:nexus|haven)$/);
+    if (nexusPreviewMatch && request.method === 'POST') {
       const body = await request.json().catch(() => ({})) as { deliver?: boolean };
-      return this.runHavenRunnerFromDashboard(decodeURIComponent(havenPreviewMatch[1]), body.deliver === true);
+      return this.runKaiNexusRunner(decodeURIComponent(nexusPreviewMatch[1]), body.deliver === true);
     }
 
     const lucienRunnerMatch = url.pathname.match(/^\/api\/pending\/([^/]+)\/run-with-lucien-chatgpt$/);
@@ -3588,7 +3560,7 @@ export class CompanionBot extends McpAgent<Env> {
           listener_enabled: isKaiListenerEnabled(this.env),
           delivery_enabled: isKaiDeliveryEnabled(this.env),
           autorespond_enabled: isKaiAutorespondEnabled(this.env),
-          runner_route: this.env.KAI_RUNNER_ROUTE || 'haven',
+          runner_route: 'nexus',
           nexus_configured: Boolean(this.env.KAI_NEXUS_URL || this.env.NEXUS),
           guild_configured: Boolean(this.env.KAI_GUILD_ID),
           category_configured: Boolean(this.env.KAI_CATEGORY_ID),
@@ -3849,7 +3821,7 @@ export class CompanionBot extends McpAgent<Env> {
               const attachments = await this.kaiAttachmentsForMessage(channelId, msg);
               const engagement: EngagementDecision = {
                 disposition: 'respond',
-                trigger_reason: 'digital-haven-public-hard-tag',
+                trigger_reason: 'digital-nexus-public-hard-tag',
                 priority: 'high',
                 hard_mention: true,
                 soft_name_mention: false,
@@ -3884,7 +3856,7 @@ export class CompanionBot extends McpAgent<Env> {
               this.logActivity(companion.id, 'queued', channelId, msg.content, authorName, msg.id, undefined, activityDebug);
               totalStored++;
               try {
-                const runnerResponse = await this.runHavenRunnerFromDashboard(command.id, isKaiDeliveryEnabled(this.env), 'autorespond');
+                const runnerResponse = await this.runKaiNexusRunner(command.id, isKaiDeliveryEnabled(this.env), 'autorespond');
                 if (!runnerResponse.ok) {
                   const errorText = await runnerResponse.text().catch(() => '');
                   this.logActivity(companion.id, 'runner_failed', channelId, errorText || `Kai social runner returned ${runnerResponse.status}`, authorName, msg.id, undefined, activityDebug);
@@ -3892,7 +3864,7 @@ export class CompanionBot extends McpAgent<Env> {
               } catch (error) {
                 this.logActivity(companion.id, 'runner_failed', channelId, error instanceof Error ? error.message : String(error), authorName, msg.id, undefined, activityDebug);
               }
-              console.log(`Cron: ${companion.name} Digital Haven hard-tag by "${msg.content}" from ${authorName}`);
+              console.log(`Cron: ${companion.name} Digital Nexus hard-tag by "${msg.content}" from ${authorName}`);
               continue;
             }
           }
@@ -3918,7 +3890,7 @@ export class CompanionBot extends McpAgent<Env> {
               const attachments = await this.kaiAttachmentsForMessage(channelId, msg);
               const engagement: EngagementDecision = {
                 disposition: 'respond',
-                trigger_reason: hardKaiMention ? 'direct-haven-hard-mention' : (directReplyToKai ? 'direct-haven-reply' : 'direct-haven-soft-name'),
+                trigger_reason: hardKaiMention ? 'direct-nexus-hard-mention' : (directReplyToKai ? 'direct-nexus-reply' : 'direct-nexus-soft-name'),
                 priority: 'high',
                 hard_mention: hardKaiMention,
                 soft_name_mention: softKaiMention,
@@ -3954,15 +3926,15 @@ export class CompanionBot extends McpAgent<Env> {
               this.logActivity(companion.id, 'queued', channelId, msg.content, authorName, msg.id, undefined, activityDebug);
               totalStored++;
               try {
-                const runnerResponse = await this.runHavenRunnerFromDashboard(command.id, true, 'autorespond');
+                const runnerResponse = await this.runKaiNexusRunner(command.id, true, 'autorespond');
                 if (!runnerResponse.ok) {
                   const errorText = await runnerResponse.text().catch(() => '');
-                  this.logActivity(companion.id, 'runner_failed', channelId, errorText || `Haven runner returned ${runnerResponse.status}`, authorName, msg.id, undefined, activityDebug);
+                  this.logActivity(companion.id, 'runner_failed', channelId, errorText || `Nexus runner returned ${runnerResponse.status}`, authorName, msg.id, undefined, activityDebug);
                 }
               } catch (error) {
                 this.logActivity(companion.id, 'runner_failed', channelId, error instanceof Error ? error.message : String(error), authorName, msg.id, undefined, activityDebug);
               }
-              console.log(`Cron: ${companion.name} direct Haven runner (${engagement.trigger_reason}) by "${msg.content}" from ${authorName}`);
+              console.log(`Cron: ${companion.name} direct Nexus runner (${engagement.trigger_reason}) by "${msg.content}" from ${authorName}`);
               continue;
             }
           }
@@ -4354,17 +4326,17 @@ export class CompanionBot extends McpAgent<Env> {
 
     this.server.tool(
       "pending_commands",
-      "Manage pending Discord messages waiting for companion responses. Actions: get, respond, dismiss, run_with_haven (supervised Kai runner preview/delivery), run_with_lucien_chatgpt (queue Lucien's Workspace Agent).",
+      "Manage pending Discord messages waiting for companion responses. Actions: get, respond, dismiss, run_with_nexus (supervised Kai runner preview/delivery; run_with_haven is a deprecated alias), run_with_lucien_chatgpt (queue Lucien's Workspace Agent).",
       {
-        action: z.enum(["get", "respond", "dismiss", "run_with_haven", "run_with_lucien_chatgpt"]).describe("The action to perform"),
+        action: z.enum(["get", "respond", "dismiss", "run_with_nexus", "run_with_haven", "run_with_lucien_chatgpt"]).describe("The action to perform"),
         entity_id: z.string().optional().describe("Optional companion/entity ID. For 'get': filters pending commands. For 'respond'/'dismiss': validates it matches the command's companion_id."),
-        requestId: z.string().optional().describe("(respond/dismiss/run_with_haven/run_with_lucien_chatgpt) The request ID from pending_commands get"),
+        requestId: z.string().optional().describe("(respond/dismiss/run_with_nexus/run_with_lucien_chatgpt) The request ID from pending_commands get"),
         response: z.string().optional().describe("(respond) The companion's response message"),
         dismissalReason: z.string().optional().describe("(dismiss) Required explanation for why this pending message is not being answered"),
-        runnerId: z.string().optional().describe("(run_with_haven) Runner lease owner id. Defaults to haven-runner:kai"),
-        deliver: z.boolean().optional().describe("(run_with_haven) Post Kai runner response to Discord. Requires KAI_DISCORD_DELIVERY_ENABLED=true."),
-        model: z.string().optional().describe("(run_with_haven) Optional Haven model override"),
-        provider: z.string().optional().describe("(run_with_haven) Optional Haven provider override"),
+        runnerId: z.string().optional().describe("(run_with_nexus) Runner lease owner id. Defaults to nexus-runner:kai"),
+        deliver: z.boolean().optional().describe("(run_with_nexus) Post Kai runner response to Discord. Requires KAI_DISCORD_DELIVERY_ENABLED=true."),
+        model: z.string().optional().describe("(run_with_nexus) Optional Nexus text model override"),
+        provider: z.string().optional().describe("(run_with_nexus) Optional provider override"),
         webhookUrl: z.string().optional().describe("(respond) Discord webhook URL override"),
         embeds: z.array(z.object({
           title: z.string().optional(),
@@ -4435,7 +4407,7 @@ export class CompanionBot extends McpAgent<Env> {
               return { content: [{ type: "text" as const, text: `Entity mismatch: ${entity_id} cannot respond as ${command.companion_id}` }] };
             }
             if (normalizeDiscordCompanionId(command.companion_id) === 'kai') {
-              return { content: [{ type: "text" as const, text: "Legacy pending_commands respond is disabled for Kai. Kai's Discord replies must come from the Haven/NESTeq runner." }] };
+              return { content: [{ type: "text" as const, text: "Legacy pending_commands respond is disabled for Kai. Kai's Discord replies must come from the Nexus/NESTeq runner." }] };
             }
             const kaiDriftReason = normalizeDiscordCompanionId(command.companion_id) === 'kai' ? kaiIdentityDriftReason(response) : null;
             if (kaiDriftReason) {
@@ -4577,12 +4549,13 @@ export class CompanionBot extends McpAgent<Env> {
             return { content: [{ type: "text" as const, text: `Response sent ${sendResult}.` }] };
           }
 
+          case "run_with_nexus":
           case "run_with_haven": {
             if (!isKaiListenerEnabled(this.env)) {
               return { content: [{ type: "text" as const, text: "Kai runner/listener is installed but disabled. Set KAI_DISCORD_LISTENER_ENABLED=true when ready for supervised testing." }] };
             }
             if (!requestId) {
-              return { content: [{ type: "text" as const, text: "requestId is required for 'run_with_haven' action" }] };
+              return { content: [{ type: "text" as const, text: `requestId is required for '${action}' action` }] };
             }
             const pendingRes = await stub.fetch(new Request('https://internal/pending'));
             const allPending = await pendingRes.json() as any[];
@@ -4594,13 +4567,13 @@ export class CompanionBot extends McpAgent<Env> {
               return { content: [{ type: "text" as const, text: `Entity mismatch: ${entity_id} cannot run ${command.companion_id}` }] };
             }
             if (normalizeDiscordCompanionId(command.companion_id) !== 'kai') {
-              return { content: [{ type: "text" as const, text: "run_with_haven is Kai-only in this rollout." }] };
+              return { content: [{ type: "text" as const, text: "run_with_nexus is Kai-only in this rollout." }] };
             }
 
-            const activeRunnerId = String(runnerId || 'haven-runner:kai');
+            const activeRunnerId = String(runnerId || 'nexus-runner:kai');
             const shouldDeliver = deliver === true;
             if (shouldDeliver) {
-              return { content: [{ type: "text" as const, text: "MCP delivery is disabled for the Kai Haven runner. Use the Resonance dashboard button for human-confirmed Discord posting." }] };
+              return { content: [{ type: "text" as const, text: "MCP delivery is disabled for the Kai Nexus runner. Use the Resonance dashboard button for human-confirmed Discord posting." }] };
             }
             let claimData: { event_id: string; wake_candidate: any; wake_context: any } | null = null;
             try {
@@ -4662,13 +4635,13 @@ export class CompanionBot extends McpAgent<Env> {
               const kaiDriftReason = kaiIdentityDriftReason(generatedResponse);
               if (kaiDriftReason) {
                 await releaseWakeCandidate(this.env, claimData.wake_candidate.id, activeRunnerId, `identity drift blocked: ${kaiDriftReason}`).catch(() => null);
-                return { content: [{ type: "text" as const, text: `Haven runner generated identity drift (${kaiDriftReason}). Nothing was sent.\n\n${generatedResponse}` }] };
+                return { content: [{ type: "text" as const, text: `Nexus runner generated identity drift (${kaiDriftReason}). Nothing was sent.\n\n${generatedResponse}` }] };
               }
               const nonVelKaiReply = !isVelDiscordAuthor(this.env, command.author?.id || command.author_id);
               const unsafeReason = nonVelKaiReply ? nonVelUnsafeResponseReason(generatedResponse) : null;
               if (unsafeReason) {
                 await releaseWakeCandidate(this.env, claimData.wake_candidate.id, activeRunnerId, `public safety blocked: ${unsafeReason}`).catch(() => null);
-                return { content: [{ type: "text" as const, text: `Haven runner generated blocked public language (${unsafeReason}). Nothing was sent.\n\n${generatedResponse}` }] };
+                return { content: [{ type: "text" as const, text: `Nexus runner generated blocked public language (${unsafeReason}). Nothing was sent.\n\n${generatedResponse}` }] };
               }
               if (!shouldDeliver) {
                 await releaseWakeCandidate(this.env, claimData.wake_candidate.id, activeRunnerId, 'supervised dry-run preview; no surface delivery').catch(() => null);
@@ -4731,7 +4704,7 @@ export class CompanionBot extends McpAgent<Env> {
                   external_message_id: sentMessageIds[sentMessageIds.length - 1] || `discord-runner:${requestId}`,
                   author: { id: 'kaisoryth', name: companion.name },
                   metadata: {
-                    runner: 'haven',
+                    runner: 'nexus',
                     delivery_status: 'delivered',
                     surface: 'discord',
                     request_id: requestId,
@@ -4761,7 +4734,7 @@ export class CompanionBot extends McpAgent<Env> {
                   channel_id: command.channel_id,
                   author_id: command.author?.id,
                   message_id: command.message_id,
-                  started_by: 'haven-runner',
+                  started_by: 'nexus-runner',
                 }),
               }));
               await stub.fetch(new Request('https://internal/delete-command', {
@@ -4782,7 +4755,7 @@ export class CompanionBot extends McpAgent<Env> {
               if (claimData?.wake_candidate?.id) {
                 await releaseWakeCandidate(this.env, claimData.wake_candidate.id, activeRunnerId, error instanceof Error ? error.message : String(error)).catch(() => null);
               }
-              return { content: [{ type: "text" as const, text: `Haven runner failed: ${error instanceof Error ? error.message : String(error)}` }] };
+              return { content: [{ type: "text" as const, text: `Nexus runner failed: ${error instanceof Error ? error.message : String(error)}` }] };
             }
           }
 
@@ -4961,7 +4934,7 @@ export class CompanionBot extends McpAgent<Env> {
               return { content: [{ type: "text" as const, text: `Entity mismatch: ${entity_id} cannot send as ${companionId}` }] };
             }
             if (targetCompanionId === 'kai') {
-              return { content: [{ type: "text" as const, text: "Legacy companion send is disabled for Kai. Kai's Discord replies must come from the Haven/NESTeq runner." }] };
+              return { content: [{ type: "text" as const, text: "Legacy companion send is disabled for Kai. Kai's Discord replies must come from the Nexus/NESTeq runner." }] };
             }
             const cRes = await stub.fetch(new Request(`https://internal/api/companions/${targetCompanionId}`));
             const companion = cRes.ok ? await cRes.json() as Companion : null;
