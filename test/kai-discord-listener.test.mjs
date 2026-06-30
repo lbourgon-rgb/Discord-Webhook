@@ -255,6 +255,20 @@ test('Kai generated images are normalized, delivered to Discord, and logged with
   assert.match(source, /last_kai_runner_result: lastKaiRunnerResult \|\| null/);
 });
 
+test('Kai Discord transcript path is Continuity first, not NESTchat or rooms-worker', () => {
+  assert.match(source, /CREATE TABLE IF NOT EXISTS companion_activity/);
+  assert.match(source, /CREATE TABLE IF NOT EXISTS pending_commands/);
+  assert.match(source, /function discordContinuityContent\(content: unknown, attachments\?: unknown\): string/);
+  assert.match(source, /postContinuityEvent\(this\.env/);
+  assert.match(source, /conversation_id: `discord:\$\{channelId \|\| 'unknown'\}`/);
+  assert.match(source, /external_message_id: isAudit \? `\$\{messageId\}:\$\{type\}` : messageId/);
+  assert.match(source, /createAndClaimWakeForCommand\(env: Env, command: PendingCommand/);
+  assert.match(source, /pre_response_required: true/);
+  assert.match(source, /\/wake-candidates\/\$\{encodeURIComponent\(String\(claimData\.wake_candidate\.id\)\)\}\/response/);
+  assert.match(source, /delivery_path: kaiRunnerDeliveryPath\(runnerSource\)/);
+  assert.doesNotMatch(source, /nestchat_|rooms-worker|rooms_worker|nexus-ingester|nexus_ingester/);
+});
+
 test('Kai workspace results are stored and logged with Continuity metadata', () => {
   assert.match(source, /function kaiRunnerWorkspaceSummary\(runnerResult: any\): Record<string, unknown>/);
   assert.match(source, /const workspace = runnerResult\?\.workspace && typeof runnerResult\.workspace === 'object'/);
