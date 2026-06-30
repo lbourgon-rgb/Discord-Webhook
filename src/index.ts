@@ -790,7 +790,7 @@ function attachmentSummaryText(attachments: unknown): string {
 
 function discordContinuityContent(content: unknown, attachments?: unknown): string {
   const text = String(content || '').trim();
-  return text || attachmentSummaryText(attachments);
+  return [text, attachmentSummaryText(attachments)].filter(Boolean).join('\n');
 }
 
 function normalizeKaiModelOverride(value: unknown): string | null {
@@ -2358,6 +2358,43 @@ export class CompanionBot extends McpAgent<Env> {
       await this.referencedImageAttachments(channelId, msg),
       await this.recentImageAttachmentsBefore(channelId, msg),
     );
+  }
+
+  private logKaiObservedTranscriptMessage(channelId: string, msg: any, monitor: DiscordMonitor): boolean {
+    if (!isKaiListenChannel(this.env, channelId)) return false;
+    const companion = this.getCompanionById('kai');
+    if (!companion) return false;
+
+    const attachments = discordAttachmentMetadata(msg?.attachments);
+    const content = discordContinuityContent(msg?.content, attachments);
+    if (!content || !msg?.id) return false;
+
+    const mentionIds = normalizeMentionIds(msg.mentions);
+    const referencedAuthorId = String(msg.referenced_message?.author?.id || msg.message_reference?.author_id || '').trim() || undefined;
+    const authorName = discordAuthorNameForKai(this.env, msg.author);
+    const engagement = classifyEngagement({
+      content: String(msg.content || ''),
+      monitor,
+      env: this.env,
+      mentionIds,
+      authorId: msg.author?.id,
+      referencedAuthorId,
+      activeConversation: Boolean(this.getActiveConversation(channelId, msg.author?.id)),
+    });
+    this.logActivity(companion.id, 'logged', channelId, msg.content, authorName, msg.id, undefined, {
+      authorId: msg.author?.id,
+      engagement: {
+        ...engagement,
+        disposition: 'log',
+        trigger_reason: 'observed-transcript',
+        priority: engagement.priority === 'high' ? 'normal' : engagement.priority,
+      },
+      mentionIds,
+      referencedAuthorId,
+      attachments,
+      createdAt: msg.timestamp,
+    });
+    return true;
   }
 
   private cleanStale() {
@@ -4075,8 +4112,10 @@ export class CompanionBot extends McpAgent<Env> {
           }
 
           if (triggered.length === 0 && !isWebhook) {
-            const companion = this.getCompanionById('kai') || this.getAllCompanions()[0];
-            if (companion) triggered = [companion];
+            if (this.logKaiObservedTranscriptMessage(channelId, msg, monitor)) {
+              totalLogged++;
+            }
+            continue;
           }
 
           // Self-trigger prevention: companion can't trigger itself
@@ -4106,7 +4145,10 @@ export class CompanionBot extends McpAgent<Env> {
           // Store a pending command for each triggered companion
           for (const companion of triggered) {
             if (normalizeDiscordCompanionId(companion.id) === 'kai') {
-              console.log(`Cron: skipped legacy Kai path for "${msg.content.substring(0, 80)}"`);
+              if (this.logKaiObservedTranscriptMessage(channelId, msg, monitor)) {
+                totalLogged++;
+              }
+              console.log(`Cron: logged Kai transcript and skipped legacy Kai path for "${msg.content.substring(0, 80)}"`);
               continue;
             }
             // Check admin-restricted channels (highest priority)

@@ -44,6 +44,12 @@ test('Discord Continuity logging preserves author id and engagement debug metada
   assert.match(source, /pre_response_required: type === 'triggered' \|\| type === 'queued'/);
 });
 
+test('Discord transcript archive content keeps text plus attachment markers', () => {
+  assert.match(source, /function discordContinuityContent\(content: unknown, attachments\?: unknown\): string/);
+  assert.match(source, /return \[text, attachmentSummaryText\(attachments\)\]\.filter\(Boolean\)\.join\('\\n'\)/);
+  assert.doesNotMatch(source, /discordContinuityContent[\s\S]{0,160}\.slice\(/);
+});
+
 test("Mor'zar Discord identity is seeded with bot id and scoped triggers", () => {
   const companionsSource = readFileSync(new URL('../src/companions.ts', import.meta.url), 'utf8');
   assert.match(companionsSource, /morzar: \{/);
@@ -269,6 +275,15 @@ test('Kai Discord transcript path is Continuity first, not NESTchat or rooms-wor
   assert.doesNotMatch(source, /nestchat_|rooms-worker|rooms_worker|nexus-ingester|nexus_ingester/);
 });
 
+test('Kai listened channels log observed Discord messages even when Kai does not respond', () => {
+  assert.match(source, /private logKaiObservedTranscriptMessage\(channelId: string, msg: any, monitor: DiscordMonitor\): boolean/);
+  assert.match(source, /if \(!isKaiListenChannel\(this\.env, channelId\)\) return false/);
+  assert.match(source, /this\.logActivity\(companion\.id, 'logged', channelId, msg\.content/);
+  assert.match(source, /trigger_reason: 'observed-transcript'/);
+  assert.match(source, /if \(triggered\.length === 0 && !isWebhook\) \{[\s\S]{0,140}this\.logKaiObservedTranscriptMessage\(channelId, msg, monitor\)[\s\S]{0,80}totalLogged\+\+/);
+  assert.match(source, /Cron: logged Kai transcript and skipped legacy Kai path/);
+});
+
 test('Kai workspace results are stored and logged with Continuity metadata', () => {
   assert.match(source, /function kaiRunnerWorkspaceSummary\(runnerResult: any\): Record<string, unknown>/);
   assert.match(source, /const workspace = runnerResult\?\.workspace && typeof runnerResult\.workspace === 'object'/);
@@ -306,7 +321,7 @@ test('Kai OCR can use images from the replied-to Discord message', () => {
 test('Kai bypasses legacy Kairos trigger path and legacy send tools', () => {
   assert.match(source, /direct-nexus-hard-mention/);
   assert.match(source, /runKaiNexusRunner\(command\.id, true, 'autorespond'\)/);
-  assert.match(source, /Cron: skipped legacy Kai path/);
+  assert.match(source, /Cron: logged Kai transcript and skipped legacy Kai path/);
   assert.match(source, /Legacy pending_commands respond is disabled for Kai/);
   assert.match(source, /Legacy companion send is disabled for Kai/);
 });
