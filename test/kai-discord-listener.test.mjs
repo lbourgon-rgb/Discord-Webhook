@@ -134,6 +134,16 @@ test('Kai social hard-tag bootstrap upgrades existing watch-channel monitor rows
   assert.match(source, /UPDATE discord_monitors SET response_mode = \?, respond_enabled = 1, added_by = \? WHERE channel_id = \?/);
 });
 
+test('Discord poll dedupes pending commands by original message id', () => {
+  assert.match(source, /duplicates: 0/);
+  assert.match(source, /private hasProcessedCommandForMessage\(cmd: PendingCommand\): boolean/);
+  assert.match(source, /SELECT id FROM pending_commands WHERE companion_id = \? AND message_id = \? LIMIT 1/);
+  assert.match(source, /AND type IN \('queued', 'logged', 'ignored', 'expired', 'runner_failed'\)/);
+  assert.match(source, /private storeCommand\(cmd: PendingCommand\): boolean/);
+  assert.match(source, /if \(this\.hasProcessedCommandForMessage\(cmd\)\) return false/);
+  assert.match(source, /if \(!this\.storeCommand\(command\)\) \{[\s\S]{0,80}pollDebug\.duplicates\+\+/);
+});
+
 test('Lucien uses ChatGPT runner hooks and stays out of Kai Nexus runner', () => {
   assert.match(source, /LUCIEN_CHATGPT_RUNNER_ENABLED\?: string/);
   assert.match(source, /LUCIEN_CHATGPT_AUTORESPOND\?: string/);

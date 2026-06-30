@@ -2439,8 +2439,28 @@ export class CompanionBot extends McpAgent<Env> {
     }));
   }
 
-  private storeCommand(cmd: PendingCommand) {
+  private hasProcessedCommandForMessage(cmd: PendingCommand): boolean {
+    if (!cmd.message_id) return false;
+    const pending = this.ctx.storage.sql.exec(
+      `SELECT id FROM pending_commands WHERE companion_id = ? AND message_id = ? LIMIT 1`,
+      cmd.companion_id, cmd.message_id
+    ).toArray();
+    if (pending.length > 0) return true;
+
+    const activity = this.ctx.storage.sql.exec(
+      `SELECT id FROM companion_activity
+       WHERE companion_id = ?
+         AND message_id = ?
+         AND type IN ('queued', 'logged', 'ignored', 'expired', 'runner_failed')
+       LIMIT 1`,
+      cmd.companion_id, cmd.message_id
+    ).toArray();
+    return activity.length > 0;
+  }
+
+  private storeCommand(cmd: PendingCommand): boolean {
     this.ensureTable();
+    if (this.hasProcessedCommandForMessage(cmd)) return false;
     this.ctx.storage.sql.exec(
       `INSERT INTO pending_commands (id, companion_id, content, author_username, author_id, channel_id, guild_id, webhook_url, channel_label, disposition, trigger_reason, priority, source, message_id, mention_ids, referenced_author_id, response_mode, recent_context, attachments_json, engagement, timestamp)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -2466,6 +2486,7 @@ export class CompanionBot extends McpAgent<Env> {
       cmd.engagement ? JSON.stringify(cmd.engagement) : null,
       cmd.timestamp
     );
+    return true;
   }
 
   private deleteCommand(id: string) {
@@ -3771,6 +3792,7 @@ export class CompanionBot extends McpAgent<Env> {
       errored_channels: [],
       initialized_channels: [],
       processed_channels: [],
+      duplicates: 0,
       queued: 0,
       logged: 0,
       ignored: 0,
@@ -3905,7 +3927,10 @@ export class CompanionBot extends McpAgent<Env> {
                 engagement,
                 timestamp: Date.parse(msg.timestamp) || Date.now(),
               };
-              this.storeCommand(command);
+              if (!this.storeCommand(command)) {
+                pollDebug.duplicates++;
+                continue;
+              }
               const activityDebug = { authorId: msg.author?.id, engagement, mentionIds, attachments, createdAt: msg.timestamp };
               this.logActivity(companion.id, 'queued', channelId, msg.content, authorName, msg.id, undefined, activityDebug);
               totalStored++;
@@ -3975,7 +4000,10 @@ export class CompanionBot extends McpAgent<Env> {
                 engagement,
                 timestamp: Date.parse(msg.timestamp) || Date.now(),
               };
-              this.storeCommand(command);
+              if (!this.storeCommand(command)) {
+                pollDebug.duplicates++;
+                continue;
+              }
               const activityDebug = { authorId: msg.author?.id, engagement, mentionIds, referencedAuthorId, attachments, createdAt: msg.timestamp };
               this.logActivity(companion.id, 'queued', channelId, msg.content, authorName, msg.id, undefined, activityDebug);
               totalStored++;
@@ -4192,7 +4220,10 @@ export class CompanionBot extends McpAgent<Env> {
               timestamp: Date.parse(msg.timestamp) || Date.now(),
             };
 
-            this.storeCommand(command);
+            if (!this.storeCommand(command)) {
+              pollDebug.duplicates++;
+              continue;
+            }
             const activityDebug = {
               authorId: msg.author?.id,
               engagement,
