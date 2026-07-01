@@ -1660,7 +1660,7 @@ export class CompanionBot extends McpAgent<Env> {
     attachments?: Array<Record<string, unknown>>;
     createdAt?: string;
     skipContinuity?: boolean;
-  }) {
+  }): Promise<any | null> | null {
     this.ensureTable();
     const storedContent = discordContinuityContent(content, debug?.attachments);
     this.ctx.storage.sql.exec(
@@ -1688,7 +1688,7 @@ export class CompanionBot extends McpAgent<Env> {
     if (!debug?.skipContinuity && storedContent && messageId && (inboundTypes.has(type) || outboundTypes.has(type) || auditTypes.has(type))) {
       const isHumanTrigger = inboundTypes.has(type);
       const isAudit = auditTypes.has(type);
-      postContinuityEvent(this.env, {
+      return postContinuityEvent(this.env, {
         companion_id: companionId,
         conversation_id: `discord:${channelId || 'unknown'}`,
         external_message_id: isAudit ? `${messageId}:${type}` : messageId,
@@ -1706,8 +1706,12 @@ export class CompanionBot extends McpAgent<Env> {
           attachments: debug?.attachments || [],
         },
         pre_response_required: type === 'triggered' || type === 'queued',
-      }).catch((err) => console.warn('[continuity] discord event failed', err));
+      }).catch((err) => {
+        console.warn('[continuity] discord event failed', err);
+        return null;
+      });
     }
+    return null;
   }
 
   getActivity(companionId: string, limit: number = 50): any[] {
@@ -2361,7 +2365,7 @@ export class CompanionBot extends McpAgent<Env> {
     );
   }
 
-  private logKaiObservedTranscriptMessage(channelId: string, msg: any, monitor: DiscordMonitor): boolean {
+  private async logKaiObservedTranscriptMessage(channelId: string, msg: any, monitor: DiscordMonitor): Promise<boolean> {
     if (!isKaiListenChannel(this.env, channelId)) return false;
     const companion = this.getCompanionById('kai');
     if (!companion) return false;
@@ -2382,7 +2386,7 @@ export class CompanionBot extends McpAgent<Env> {
       referencedAuthorId,
       activeConversation: Boolean(this.getActiveConversation(channelId, msg.author?.id)),
     });
-    this.logActivity(companion.id, 'logged', channelId, msg.content, authorName, msg.id, undefined, {
+    const continuityWrite = this.logActivity(companion.id, 'logged', channelId, msg.content, authorName, msg.id, undefined, {
       authorId: msg.author?.id,
       engagement: {
         ...engagement,
@@ -2395,6 +2399,7 @@ export class CompanionBot extends McpAgent<Env> {
       attachments,
       createdAt: msg.timestamp,
     });
+    if (continuityWrite) await continuityWrite;
     return true;
   }
 
@@ -4113,7 +4118,7 @@ export class CompanionBot extends McpAgent<Env> {
           }
 
           if (triggered.length === 0 && !isWebhook) {
-            if (this.logKaiObservedTranscriptMessage(channelId, msg, monitor)) {
+            if (await this.logKaiObservedTranscriptMessage(channelId, msg, monitor)) {
               totalLogged++;
             }
             continue;
@@ -4146,7 +4151,7 @@ export class CompanionBot extends McpAgent<Env> {
           // Store a pending command for each triggered companion
           for (const companion of triggered) {
             if (normalizeDiscordCompanionId(companion.id) === 'kai') {
-              if (this.logKaiObservedTranscriptMessage(channelId, msg, monitor)) {
+              if (await this.logKaiObservedTranscriptMessage(channelId, msg, monitor)) {
                 totalLogged++;
               }
               console.log(`Cron: logged Kai transcript and skipped legacy Kai path for "${msg.content.substring(0, 80)}"`);

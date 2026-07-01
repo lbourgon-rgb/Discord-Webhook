@@ -35,6 +35,7 @@ test('Discord identity classification keeps Kai mention ids separate from Vel au
 });
 
 test('Discord Continuity logging preserves author id and engagement debug metadata', () => {
+  assert.match(source, /logActivity\(companionId: string[\s\S]+?\): Promise<any \| null> \| null/);
   assert.match(source, /author: \{ id: debug\?\.authorId \|\| undefined, name:/);
   assert.match(source, /author_id, engagement, message_id, webhook_url/);
   assert.match(source, /created_at: debug\?\.createdAt/);
@@ -42,6 +43,8 @@ test('Discord Continuity logging preserves author id and engagement debug metada
   assert.match(source, /referenced_author_id: debug\?\.referencedAuthorId \|\| null/);
   assert.match(source, /activity_type: type/);
   assert.match(source, /pre_response_required: type === 'triggered' \|\| type === 'queued'/);
+  assert.match(source, /return postContinuityEvent\(this\.env/);
+  assert.match(source, /console\.warn\('\[continuity\] discord event failed', err\);[\s\S]{0,80}return null/);
 });
 
 test('Discord transcript archive content keeps text plus attachment markers', () => {
@@ -277,11 +280,12 @@ test('Kai Discord transcript path is Continuity first, not NESTchat or rooms-wor
 
 test('Kai listened channels log observed Discord messages even when Kai does not respond', () => {
   assert.match(source, /const channels = listen\.length \? listen : splitIds\(env\.WATCH_CHANNELS\)/);
-  assert.match(source, /private logKaiObservedTranscriptMessage\(channelId: string, msg: any, monitor: DiscordMonitor\): boolean/);
+  assert.match(source, /private async logKaiObservedTranscriptMessage\(channelId: string, msg: any, monitor: DiscordMonitor\): Promise<boolean>/);
   assert.match(source, /if \(!isKaiListenChannel\(this\.env, channelId\)\) return false/);
-  assert.match(source, /this\.logActivity\(companion\.id, 'logged', channelId, msg\.content/);
+  assert.match(source, /const continuityWrite = this\.logActivity\(companion\.id, 'logged', channelId, msg\.content/);
+  assert.match(source, /if \(continuityWrite\) await continuityWrite/);
   assert.match(source, /trigger_reason: 'observed-transcript'/);
-  assert.match(source, /if \(triggered\.length === 0 && !isWebhook\) \{[\s\S]{0,140}this\.logKaiObservedTranscriptMessage\(channelId, msg, monitor\)[\s\S]{0,80}totalLogged\+\+/);
+  assert.match(source, /if \(triggered\.length === 0 && !isWebhook\) \{[\s\S]{0,140}await this\.logKaiObservedTranscriptMessage\(channelId, msg, monitor\)[\s\S]{0,80}totalLogged\+\+/);
   assert.match(source, /Cron: logged Kai transcript and skipped legacy Kai path/);
 });
 
