@@ -186,7 +186,8 @@ function isKaiAccessibleChannel(env: Env, channelId: string): boolean {
 
 function isKaiListenChannel(env: Env, channelId: string): boolean {
   const listen = getKaiListenChannelIds(env);
-  return listen.length > 0 && listen.includes(channelId) && isKaiAccessibleChannel(env, channelId);
+  const channels = listen.length ? listen : splitIds(env.WATCH_CHANNELS);
+  return channels.includes(channelId) && isKaiAccessibleChannel(env, channelId);
 }
 
 function getKaiSocialHardTagChannelIds(env: Env): string[] {

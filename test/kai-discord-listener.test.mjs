@@ -276,6 +276,7 @@ test('Kai Discord transcript path is Continuity first, not NESTchat or rooms-wor
 });
 
 test('Kai listened channels log observed Discord messages even when Kai does not respond', () => {
+  assert.match(source, /const channels = listen\.length \? listen : splitIds\(env\.WATCH_CHANNELS\)/);
   assert.match(source, /private logKaiObservedTranscriptMessage\(channelId: string, msg: any, monitor: DiscordMonitor\): boolean/);
   assert.match(source, /if \(!isKaiListenChannel\(this\.env, channelId\)\) return false/);
   assert.match(source, /this\.logActivity\(companion\.id, 'logged', channelId, msg\.content/);
