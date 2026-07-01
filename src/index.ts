@@ -51,6 +51,8 @@ interface Env {
   KAI_BACKUP_MODEL?: string;
   KAI_SOCIAL_GUILD_IDS?: string;
   KAI_SOCIAL_HARD_TAG_CHANNEL_IDS?: string;
+  KAI_SOCIAL_SOFT_TAG_CHANNEL_IDS?: string;
+  KAI_SOCIAL_DISCERN_CHANNEL_IDS?: string;
   KAI_SOCIAL_AUTORESPOND_ENABLED?: string;
   LUCIEN_CHATGPT_RUNNER_ENABLED?: string;
   LUCIEN_CHATGPT_AUTORESPOND?: string;
@@ -71,7 +73,7 @@ interface Env {
   GROK_KETH_DISCORD_USER_IDS?: string;
 }
 
-type DiscordResponseMode = 'never' | 'mention' | 'urgent' | 'filtered' | 'open' | 'community_greeting';
+type DiscordResponseMode = 'never' | 'mention' | 'urgent' | 'filtered' | 'open' | 'community_greeting' | 'discern';
 type KairosDisposition = 'respond' | 'log' | 'ignore';
 type KairosPriority = 'low' | 'normal' | 'high';
 const PENDING_TTL_MS = 10 * 60 * 1000;
@@ -176,7 +178,12 @@ function getKaiListenChannelIds(env: Env): string[] {
 
 function getKaiAccessibleChannelIds(env: Env): string[] {
   const configured = splitIds(env.KAI_ACCESSIBLE_CHANNEL_IDS);
-  return configured.length ? configured : splitIds(env.WATCH_CHANNELS);
+  return [...new Set([
+    ...(configured.length ? configured : splitIds(env.WATCH_CHANNELS)),
+    ...splitIds(env.KAI_SOCIAL_HARD_TAG_CHANNEL_IDS),
+    ...splitIds(env.KAI_SOCIAL_SOFT_TAG_CHANNEL_IDS),
+    ...splitIds(env.KAI_SOCIAL_DISCERN_CHANNEL_IDS),
+  ])];
 }
 
 function isKaiAccessibleChannel(env: Env, channelId: string): boolean {
@@ -185,6 +192,13 @@ function isKaiAccessibleChannel(env: Env, channelId: string): boolean {
 }
 
 function isKaiListenChannel(env: Env, channelId: string): boolean {
+  if (
+    isKaiSocialHardTagChannel(env, channelId)
+    || isKaiSocialSoftTagChannel(env, channelId)
+    || isKaiSocialDiscernChannel(env, channelId)
+  ) {
+    return isKaiAccessibleChannel(env, channelId);
+  }
   const listen = getKaiListenChannelIds(env);
   const channels = listen.length ? listen : splitIds(env.WATCH_CHANNELS);
   return channels.includes(channelId) && isKaiAccessibleChannel(env, channelId);
@@ -196,6 +210,22 @@ function getKaiSocialHardTagChannelIds(env: Env): string[] {
 
 function isKaiSocialHardTagChannel(env: Env, channelId: string): boolean {
   return getKaiSocialHardTagChannelIds(env).includes(channelId);
+}
+
+function getKaiSocialSoftTagChannelIds(env: Env): string[] {
+  return splitIds(env.KAI_SOCIAL_SOFT_TAG_CHANNEL_IDS);
+}
+
+function isKaiSocialSoftTagChannel(env: Env, channelId: string): boolean {
+  return getKaiSocialSoftTagChannelIds(env).includes(channelId);
+}
+
+function getKaiSocialDiscernChannelIds(env: Env): string[] {
+  return splitIds(env.KAI_SOCIAL_DISCERN_CHANNEL_IDS);
+}
+
+function isKaiSocialDiscernChannel(env: Env, channelId: string): boolean {
+  return getKaiSocialDiscernChannelIds(env).includes(channelId);
 }
 
 function isKaiSocialAutorespondEnabled(env: Env): boolean {
@@ -311,7 +341,38 @@ function isCommunityGreeting(content: string): boolean {
 
 function allowsCommunityGreeting(monitor: DiscordMonitor): boolean {
   return monitor.respond_enabled === true
-    && (monitor.response_mode === 'open' || monitor.response_mode === 'community_greeting');
+    && (monitor.response_mode === 'open' || monitor.response_mode === 'community_greeting' || monitor.response_mode === 'discern');
+}
+
+function kaiDiscernmentReason(input: {
+  content: string;
+  hardMention: boolean;
+  softNameMention: boolean;
+  directReplyToKai: boolean;
+  activeConversation: boolean;
+  urgent: boolean;
+  communityGreeting: boolean;
+}): string | null {
+  if (input.hardMention) return input.urgent ? 'discernment-hard-mention-urgent' : 'discernment-hard-mention';
+  if (input.directReplyToKai) return input.urgent ? 'discernment-direct-reply-urgent' : 'discernment-direct-reply';
+  if (input.softNameMention) return input.urgent ? 'discernment-name-mention-urgent' : 'discernment-name-mention';
+  if (input.activeConversation) return input.urgent ? 'discernment-active-conversation-urgent' : 'discernment-active-conversation';
+  if (input.urgent) return 'discernment-urgency';
+
+  const normalized = input.content.toLowerCase().replace(/\s+/g, ' ').trim();
+  if (!normalized) return null;
+  if (input.communityGreeting) return 'discernment-community-greeting';
+  if (/[?？]/.test(input.content)) return 'discernment-question';
+  if (/\b(what do you think|thoughts|chime in|jump in|weigh in|can you|could you|would you|should we|help me|help us)\b/i.test(normalized)) {
+    return 'discernment-invitation';
+  }
+  if (
+    input.content.length >= 80
+    && /\b(struggling|stuck|confused|worried|scared|excited|proud|sad|angry|overwhelmed|thinking through|trying to understand)\b/i.test(normalized)
+  ) {
+    return 'discernment-emotional-signal';
+  }
+  return null;
 }
 
 function engagementDebug(input: EngagementDecision): Record<string, unknown> {
@@ -427,6 +488,20 @@ function classifyEngagement(input: {
   }
   if (directReplyToKai) {
     return { disposition: 'respond', trigger_reason: 'direct-reply-to-kai', priority: urgent ? 'high' : 'normal', ...base };
+  }
+  if (responseMode === 'discern') {
+    const discernReason = kaiDiscernmentReason({
+      content,
+      hardMention,
+      softNameMention,
+      directReplyToKai,
+      activeConversation,
+      urgent,
+      communityGreeting,
+    });
+    return discernReason
+      ? { disposition: 'respond', trigger_reason: discernReason, priority: urgent || hardMention || directReplyToKai ? 'high' : 'normal', ...base }
+      : { disposition: 'log', trigger_reason: otherUserTag ? 'other-user-tag-not-kai' : 'discernment-no-speech', priority: 'low', ...base };
   }
   if (responseMode === 'open') {
     return { disposition: 'respond', trigger_reason: urgent ? 'open-monitor-urgent' : (hardMention ? 'open-monitor-hard-mention' : (softNameMention ? 'open-monitor-name-mention' : (communityGreeting ? 'open-monitor-community-greeting' : 'open-monitor'))), priority: urgent ? 'high' : (hardMention || softNameMention || communityGreeting ? 'normal' : 'low'), ...base };
@@ -743,6 +818,10 @@ function kaiRunnerEnvelopeForCommand(command: PendingCommand): Record<string, un
     recent_context: command.recent_context,
     mentions: command.mention_ids || [],
     attachments: command.attachments || [],
+    response_mode: command.response_mode,
+    trigger_reason: command.trigger_reason,
+    priority: command.priority,
+    engagement: command.engagement || null,
     trigger: command.source === 'manual'
       ? 'manual'
       : command.priority === 'high' || command.mention_ids?.length
@@ -1406,17 +1485,29 @@ export class CompanionBot extends McpAgent<Env> {
     const privateChannels = kaiListenChannels.length
       ? kaiListenChannels.filter(channelId => isKaiAccessibleChannel(this.env, channelId))
       : (this.env.WATCH_CHANNELS || '').split(',').map(s => s.trim()).filter(Boolean);
-    const socialChannels = getKaiSocialHardTagChannelIds(this.env);
+    const socialHardChannels = getKaiSocialHardTagChannelIds(this.env);
+    const socialSoftChannels = getKaiSocialSoftTagChannelIds(this.env);
+    const socialDiscernChannels = getKaiSocialDiscernChannelIds(this.env);
     const monitorConfigs = [
       ...privateChannels.map(channelId => ({
         channelId,
         addedBy: kaiListenChannels.length ? 'KAI_LISTEN_CHANNEL_IDS' : 'WATCH_CHANNELS',
         responseMode: 'filtered',
       })),
-      ...socialChannels.map(channelId => ({
+      ...socialHardChannels.map(channelId => ({
         channelId,
         addedBy: 'KAI_SOCIAL_HARD_TAG_CHANNEL_IDS',
         responseMode: 'mention',
+      })),
+      ...socialSoftChannels.map(channelId => ({
+        channelId,
+        addedBy: 'KAI_SOCIAL_SOFT_TAG_CHANNEL_IDS',
+        responseMode: 'mention',
+      })),
+      ...socialDiscernChannels.map(channelId => ({
+        channelId,
+        addedBy: 'KAI_SOCIAL_DISCERN_CHANNEL_IDS',
+        responseMode: 'discern',
       })),
     ];
     for (const config of monitorConfigs) {
@@ -1429,7 +1520,7 @@ export class CompanionBot extends McpAgent<Env> {
         `UPDATE discord_monitors SET response_mode = ?, respond_enabled = 1 WHERE channel_id = ? AND added_by = ?`,
         config.responseMode, config.channelId, config.addedBy
       );
-      if (config.addedBy === 'KAI_SOCIAL_HARD_TAG_CHANNEL_IDS') {
+      if (config.addedBy.startsWith('KAI_SOCIAL_')) {
         this.ctx.storage.sql.exec(
           `UPDATE discord_monitors SET response_mode = ?, respond_enabled = 1, added_by = ? WHERE channel_id = ?`,
           config.responseMode, config.addedBy, config.channelId
@@ -3684,6 +3775,9 @@ export class CompanionBot extends McpAgent<Env> {
           category_configured: Boolean(this.env.KAI_CATEGORY_ID),
           mention_user_configured: Boolean(this.env.KAI_MENTION_USER_ID || this.env.KAI_DISCORD_USER_IDS),
           listen_channel_count: getKaiListenChannelIds(this.env).length,
+          social_hard_channel_count: getKaiSocialHardTagChannelIds(this.env).length,
+          social_soft_channel_count: getKaiSocialSoftTagChannelIds(this.env).length,
+          social_discern_channel_count: getKaiSocialDiscernChannelIds(this.env).length,
           accessible_channel_count: getKaiAccessibleChannelIds(this.env).length,
         },
         watch_channels: channelDetails,
@@ -3924,70 +4018,76 @@ export class CompanionBot extends McpAgent<Env> {
           if (!messageHasUsableContent(msg)) continue;
           msg.content = String(msg.content || '');
 
-          if (
-            !isWebhook
-            && isKaiListenerEnabled(this.env)
-            && isKaiSocialAutorespondEnabled(this.env)
-            && (isKaiSocialHardTagChannel(this.env, channelId) || axiomBotMayHardTagKai)
-          ) {
+          if (!isWebhook && isKaiListenerEnabled(this.env) && isKaiSocialAutorespondEnabled(this.env)) {
             const mentionIds = normalizeMentionIds(msg.mentions);
             const hardKaiMention = containsHardKaiMention(msg.content, this.env, mentionIds);
-            if (hardKaiMention) {
+            const softKaiMention = containsSoftKaiName(msg.content);
+            const hardChannel = isKaiSocialHardTagChannel(this.env, channelId) || axiomBotMayHardTagKai;
+            const softChannel = isKaiSocialSoftTagChannel(this.env, channelId);
+            const discernChannel = isKaiSocialDiscernChannel(this.env, channelId);
+            const otherUserTag = mentionsNonKaiUser(msg.content, this.env, mentionIds);
+            const hardAllowed = hardKaiMention && hardChannel;
+            const softAllowed = softKaiMention && softChannel && !otherUserTag;
+            if (hardAllowed || softAllowed || discernChannel) {
               const companion = this.getCompanionById('kai');
               if (!companion) continue;
-              const authorName = discordAuthorNameForKai(this.env, msg.author);
-              const recentContext = await this.recentContextForMessage(channelId, msg, messages);
-              const attachments = await this.kaiAttachmentsForMessage(channelId, msg);
-              const engagement: EngagementDecision = {
-                disposition: 'respond',
-                trigger_reason: 'digital-nexus-public-hard-tag',
-                priority: 'high',
-                hard_mention: true,
-                soft_name_mention: false,
-                active_conversation: false,
-                direct_reply_to_kai: false,
-                other_user_tag: mentionsNonKaiUser(msg.content, this.env, mentionIds),
-                author_class: isVelDiscordAuthor(this.env, msg.author?.id) ? 'vel' : 'unknown',
-                community_greeting: isCommunityGreeting(msg.content),
-              };
-              const command: PendingCommand = {
-                id: crypto.randomUUID(),
-                companion_id: companion.id,
+              const responseMode: DiscordResponseMode = discernChannel ? 'discern' : 'mention';
+              const referencedAuthorId = String(msg.referenced_message?.author?.id || msg.message_reference?.author_id || '').trim() || undefined;
+              const policyMonitor: DiscordMonitor = { ...monitor, response_mode: responseMode, respond_enabled: true };
+              const engagement = classifyEngagement({
                 content: msg.content,
-                author: { username: authorName, id: msg.author?.id },
-                channel_id: channelId,
-                guild_id: guildId || String(msg.guild_id || '') || undefined,
-                channel_label: monitor.label,
-                disposition: 'respond',
-                trigger_reason: engagement.trigger_reason,
-                priority: 'high',
-                source: 'poll',
-                message_id: msg.id,
-                mention_ids: mentionIds,
-                response_mode: 'mention',
-                recent_context: recentContext,
-                attachments,
-                engagement,
-                timestamp: Date.parse(msg.timestamp) || Date.now(),
-              };
-              if (!this.storeCommand(command)) {
-                pollDebug.duplicates++;
+                monitor: policyMonitor,
+                env: this.env,
+                mentionIds,
+                authorId: msg.author?.id,
+                referencedAuthorId,
+                activeConversation: Boolean(this.getActiveConversation(channelId, msg.author?.id)),
+              });
+              const shouldQueueKai = hardAllowed || softAllowed || (discernChannel && engagement.disposition === 'respond');
+              if (shouldQueueKai) {
+                const authorName = discordAuthorNameForKai(this.env, msg.author);
+                const recentContext = await this.recentContextForMessage(channelId, msg, messages);
+                const attachments = await this.kaiAttachmentsForMessage(channelId, msg);
+                const command: PendingCommand = {
+                  id: crypto.randomUUID(),
+                  companion_id: companion.id,
+                  content: msg.content,
+                  author: { username: authorName, id: msg.author?.id },
+                  channel_id: channelId,
+                  guild_id: guildId || String(msg.guild_id || '') || undefined,
+                  channel_label: monitor.label,
+                  disposition: 'respond',
+                  trigger_reason: engagement.trigger_reason,
+                  priority: engagement.priority,
+                  source: 'poll',
+                  message_id: msg.id,
+                  mention_ids: mentionIds,
+                  referenced_author_id: referencedAuthorId,
+                  response_mode: responseMode,
+                  recent_context: recentContext,
+                  attachments,
+                  engagement,
+                  timestamp: Date.parse(msg.timestamp) || Date.now(),
+                };
+                if (!this.storeCommand(command)) {
+                  pollDebug.duplicates++;
+                  continue;
+                }
+                const activityDebug = { authorId: msg.author?.id, engagement, mentionIds, attachments, createdAt: msg.timestamp };
+                this.logActivity(companion.id, 'queued', channelId, msg.content, authorName, msg.id, undefined, activityDebug);
+                totalStored++;
+                try {
+                  const runnerResponse = await this.runKaiNexusRunner(command.id, isKaiDeliveryEnabled(this.env), 'autorespond');
+                  if (!runnerResponse.ok) {
+                    const errorText = await runnerResponse.text().catch(() => '');
+                    this.logActivity(companion.id, 'runner_failed', channelId, errorText || `Kai social runner returned ${runnerResponse.status}`, authorName, msg.id, undefined, activityDebug);
+                  }
+                } catch (error) {
+                  this.logActivity(companion.id, 'runner_failed', channelId, error instanceof Error ? error.message : String(error), authorName, msg.id, undefined, activityDebug);
+                }
+                console.log(`Cron: ${companion.name} social ${engagement.trigger_reason} by "${msg.content}" from ${authorName}`);
                 continue;
               }
-              const activityDebug = { authorId: msg.author?.id, engagement, mentionIds, attachments, createdAt: msg.timestamp };
-              this.logActivity(companion.id, 'queued', channelId, msg.content, authorName, msg.id, undefined, activityDebug);
-              totalStored++;
-              try {
-                const runnerResponse = await this.runKaiNexusRunner(command.id, isKaiDeliveryEnabled(this.env), 'autorespond');
-                if (!runnerResponse.ok) {
-                  const errorText = await runnerResponse.text().catch(() => '');
-                  this.logActivity(companion.id, 'runner_failed', channelId, errorText || `Kai social runner returned ${runnerResponse.status}`, authorName, msg.id, undefined, activityDebug);
-                }
-              } catch (error) {
-                this.logActivity(companion.id, 'runner_failed', channelId, error instanceof Error ? error.message : String(error), authorName, msg.id, undefined, activityDebug);
-              }
-              console.log(`Cron: ${companion.name} Digital Nexus hard-tag by "${msg.content}" from ${authorName}`);
-              continue;
             }
           }
 
@@ -4980,7 +5080,7 @@ export class CompanionBot extends McpAgent<Env> {
         tier: z.enum(["fast", "normal", "slow"]).optional().describe("(add) Monitor tier"),
         enabled: z.boolean().optional().describe("(add) Whether monitor starts enabled"),
         respondEnabled: z.boolean().optional().describe("(add) Whether monitor can queue responses"),
-        responseMode: z.enum(["never", "mention", "urgent", "filtered", "open", "community_greeting"]).optional().describe("(add) KAIROS-compatible response mode"),
+        responseMode: z.enum(["never", "mention", "urgent", "filtered", "open", "community_greeting", "discern"]).optional().describe("(add) KAIROS-compatible response mode"),
         cooldownMs: z.number().optional().describe("(add) Response cooldown in milliseconds"),
       },
       async ({ action, id, channelId, label, tier, enabled, respondEnabled, responseMode, cooldownMs }: any) => {

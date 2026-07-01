@@ -6,12 +6,27 @@ import { findTriggeredCompanion } from '../src/companions.ts';
 const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
 
 test('Discord response modes include community greeting without loosening ordinary ambient chatter', () => {
-  assert.match(source, /type DiscordResponseMode = 'never' \| 'mention' \| 'urgent' \| 'filtered' \| 'open' \| 'community_greeting'/);
+  assert.match(source, /type DiscordResponseMode = 'never' \| 'mention' \| 'urgent' \| 'filtered' \| 'open' \| 'community_greeting' \| 'discern'/);
   assert.match(source, /function isCommunityGreeting\(content: string\)/);
   assert.match(source, /function allowsCommunityGreeting\(monitor: DiscordMonitor\)/);
   assert.match(source, /communityGreeting && allowsCommunityGreeting\(input\.monitor\) && !otherUserTag/);
   assert.match(source, /non-vel-public-community-greeting/);
   assert.match(source, /otherUserTag \? 'other-user-tag-not-kai' : 'ambient-message'/);
+});
+
+test('Kai social policy supports soft-tag and discernment channel lists', () => {
+  assert.match(source, /KAI_SOCIAL_SOFT_TAG_CHANNEL_IDS\?: string/);
+  assert.match(source, /KAI_SOCIAL_DISCERN_CHANNEL_IDS\?: string/);
+  assert.match(source, /function isKaiSocialSoftTagChannel\(env: Env, channelId: string\): boolean/);
+  assert.match(source, /function isKaiSocialDiscernChannel\(env: Env, channelId: string\): boolean/);
+  assert.match(source, /monitor\.response_mode === 'open' \|\| monitor\.response_mode === 'community_greeting' \|\| monitor\.response_mode === 'discern'/);
+});
+
+test('Kai social discernment can queue softer turns without treating every message as a hard tag', () => {
+  assert.match(source, /function kaiDiscernmentReason\(input:/);
+  assert.match(source, /const softAllowed = softKaiMention && softChannel && !otherUserTag/);
+  assert.match(source, /const responseMode: DiscordResponseMode = discernChannel \? 'discern' : 'mention'/);
+  assert.match(source, /const shouldQueueKai = hardAllowed \|\| softAllowed \|\| \(discernChannel && engagement\.disposition === 'respond'\)/);
 });
 
 test('Kai soft-name mentions bypass monitor cooldowns', () => {
@@ -135,12 +150,19 @@ test('Axiom bot may hard-tag Kai for live supervised smoke tests without opening
   assert.match(source, /splitIds\(this\.env\.AXIOM_DISCORD_USER_IDS \|\| '1515127400491647076'\)\.includes\(String\(msg\.author\?\.id \|\| ''\)\)/);
   assert.match(source, /containsHardKaiMention\(String\(msg\.content \|\| ''\), this\.env, normalizeMentionIds\(msg\.mentions\)\)/);
   assert.match(source, /if \(isBot && !isWebhook && !axiomBotMayHardTagKai\) continue/);
-  assert.match(source, /&& \(isKaiSocialHardTagChannel\(this\.env, channelId\) \|\| axiomBotMayHardTagKai\)/);
+  assert.match(source, /const hardChannel = isKaiSocialHardTagChannel\(this\.env, channelId\) \|\| axiomBotMayHardTagKai/);
+  assert.match(source, /const hardAllowed = hardKaiMention && hardChannel/);
 });
 
 test('Kai social hard-tag bootstrap upgrades existing watch-channel monitor rows', () => {
-  assert.match(source, /config\.addedBy === 'KAI_SOCIAL_HARD_TAG_CHANNEL_IDS'/);
+  assert.match(source, /config\.addedBy\.startsWith\('KAI_SOCIAL_'\)/);
   assert.match(source, /UPDATE discord_monitors SET response_mode = \?, respond_enabled = 1, added_by = \? WHERE channel_id = \?/);
+});
+
+test('Kai runner envelope carries Discord engagement policy context', () => {
+  assert.match(source, /response_mode: command\.response_mode/);
+  assert.match(source, /trigger_reason: command\.trigger_reason/);
+  assert.match(source, /engagement: command\.engagement \|\| null/);
 });
 
 test('Discord poll dedupes pending commands by original message id', () => {
