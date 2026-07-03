@@ -253,6 +253,16 @@ test('Kai Nexus runner stays guarded behind explicit flags and wake leases', () 
   assert.match(source, /async alarm\(\) \{[\s\S]+await this\.serviceKaiAutoresponderQueue\(\)/);
 });
 
+test('Kai hard-tag autoresponses do not leave empty generated replies pending', () => {
+  assert.match(source, /function isRequiredKaiReply\(command: PendingCommand, runnerResult: any\): boolean/);
+  assert.match(source, /runnerResult\?\.should_respond === true/);
+  assert.match(source, /runnerGenerationFailureMessage\(runnerResult\)/);
+  assert.match(source, /mode: 'required_reply_generation_failed'/);
+  assert.match(source, /status: 502/);
+  assert.match(source, /generation: runnerGenerationSummary\(runnerResult\)/);
+  assert.match(source, /serviceKaiAutoresponderQueue\(\)[\s\S]+!runnerResponse\.ok[\s\S]+this\.deleteCommand\(command\.id\)/);
+});
+
 test('Kai generated images are normalized, delivered to Discord, and logged with Continuity', () => {
   assert.match(source, /const KAI_PUBLIC_MIND_ORIGIN = 'https:\/\/mind\.serythrae\.com'/);
   assert.match(source, /function absoluteKaiImageUrl\(value: unknown\): string \| null/);

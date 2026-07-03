@@ -1071,6 +1071,33 @@ function runnerSocialDecision(runnerResult: any): { decision?: string; recommend
   }
 }
 
+function runnerGenerationSummary(runnerResult: any): Record<string, unknown> | null {
+  const generation = runnerResult?.generation && typeof runnerResult.generation === 'object'
+    ? runnerResult.generation as Record<string, unknown>
+    : null;
+  return generation ? generation : null;
+}
+
+function runnerGenerationFailureMessage(runnerResult: any): string {
+  const generation = runnerGenerationSummary(runnerResult);
+  const error = typeof generation?.error === 'string' ? generation.error.trim() : '';
+  const model = typeof generation?.model === 'string' ? generation.model.trim() : '';
+  return [
+    'Kai runner returned no text for a required Discord reply',
+    model ? `model=${model}` : '',
+    error ? `error=${error}` : '',
+  ].filter(Boolean).join('; ');
+}
+
+function isRequiredKaiReply(command: PendingCommand, runnerResult: any): boolean {
+  const engagement = (command.engagement || {}) as Partial<EngagementDecision>;
+  return runnerResult?.should_respond === true
+    || engagement.hard_mention === true
+    || engagement.direct_reply_to_kai === true
+    || engagement.soft_name_mention === true
+    || engagement.active_conversation === true;
+}
+
 interface KaiGeneratedDiscordImage {
   index: number;
   url: string;
@@ -2771,6 +2798,7 @@ export class CompanionBot extends McpAgent<Env> {
         response_present: Boolean(String(runnerResult?.response || '').trim()),
         image_request_prompt: imageRequestPrompt,
         image_generation: runnerImageGeneration,
+        generation: runnerGenerationSummary(runnerResult),
         vision: runnerVision,
         workspace: runnerWorkspace,
         updated_at: new Date().toISOString(),
@@ -2807,7 +2835,20 @@ export class CompanionBot extends McpAgent<Env> {
         }, null, 2), { headers: { 'Content-Type': 'application/json' } });
       }
       if (!deliveryResponse && this.env.KAI_RUNNER_ROUTE === 'nexus' && runnerResult?.generated === false) {
-        await releaseWakeCandidate(this.env, claimData.wake_candidate.id, runnerId, 'nexus dry-run contract; no text generation yet').catch(() => null);
+        const requiredReply = isRequiredKaiReply(command, runnerResult);
+        const failureMessage = runnerGenerationFailureMessage(runnerResult);
+        await releaseWakeCandidate(this.env, claimData.wake_candidate.id, runnerId, requiredReply ? failureMessage : 'nexus dry-run contract; no text generation yet').catch(() => null);
+        if (requiredReply && deliver) {
+          return new Response(JSON.stringify({
+            ok: false,
+            mode: 'required_reply_generation_failed',
+            error: failureMessage,
+            request_id: requestId,
+            continuity_event_id: claimData.event_id,
+            wake_candidate_id: claimData.wake_candidate.id,
+            runner_result: runnerResult,
+          }, null, 2), { status: 502, headers: { 'Content-Type': 'application/json' } });
+        }
         return new Response(JSON.stringify({
           ok: true,
           mode: 'nexus_runner_dry_run',
@@ -4892,7 +4933,20 @@ export class CompanionBot extends McpAgent<Env> {
                 }, null, 2) }] };
               }
               if (!generatedResponse && this.env.KAI_RUNNER_ROUTE === 'nexus' && runnerResult?.generated === false) {
-                await releaseWakeCandidate(this.env, claimData.wake_candidate.id, activeRunnerId, 'nexus dry-run contract; no text generation yet').catch(() => null);
+                const requiredReply = isRequiredKaiReply(command, runnerResult);
+                const failureMessage = runnerGenerationFailureMessage(runnerResult);
+                await releaseWakeCandidate(this.env, claimData.wake_candidate.id, activeRunnerId, requiredReply ? failureMessage : 'nexus dry-run contract; no text generation yet').catch(() => null);
+                if (requiredReply && shouldDeliver) {
+                  return { content: [{ type: "text" as const, text: JSON.stringify({
+                    ok: false,
+                    mode: 'required_reply_generation_failed',
+                    error: failureMessage,
+                    requestId,
+                    continuity_event_id: claimData.event_id,
+                    wake_candidate_id: claimData.wake_candidate.id,
+                    runner_result: runnerResult,
+                  }, null, 2) }] };
+                }
                 return { content: [{ type: "text" as const, text: JSON.stringify({
                   ok: true,
                   mode: 'nexus_runner_dry_run',
