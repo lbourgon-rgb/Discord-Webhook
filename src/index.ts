@@ -1024,7 +1024,10 @@ function kaiRunnerDeliveryPath(runnerSource: string): string {
 
 function isRequiredVelHardTag(cmd: Pick<PendingCommand, 'priority' | 'trigger_reason' | 'engagement'>): boolean {
   return cmd.priority === 'high'
-    && String(cmd.trigger_reason || '').startsWith('vel-hard-mention-required')
+    && (
+      String(cmd.trigger_reason || '').startsWith('vel-hard-mention-required')
+      || String(cmd.trigger_reason || '') === 'direct-nexus-hard-mention'
+    )
     && cmd.engagement?.author_class === 'vel'
     && cmd.engagement?.hard_mention === true;
 }
@@ -2628,6 +2631,58 @@ export class CompanionBot extends McpAgent<Env> {
     this.ctx.storage.sql.exec(`DELETE FROM pending_commands WHERE id = ?`, id);
   }
 
+  private async scheduleKaiAutoresponder(delayMs = 1000) {
+    if (!isKaiListenerEnabled(this.env) || !isKaiDeliveryEnabled(this.env)) return;
+    try {
+      const target = Date.now() + delayMs;
+      const existing = await this.ctx.storage.getAlarm();
+      if (!existing || existing > target + 5000) {
+        await this.ctx.storage.setAlarm(target);
+      }
+    } catch (error) {
+      console.warn('[kai-autoresponder] failed to schedule alarm', error);
+    }
+  }
+
+  private async serviceKaiAutoresponderQueue() {
+    if (!isKaiListenerEnabled(this.env) || !isKaiDeliveryEnabled(this.env) || !isKaiAutorespondEnabled(this.env)) return;
+    const command = this.getPending().find(cmd =>
+      normalizeDiscordCompanionId(cmd.companion_id) === 'kai'
+      && String(cmd.disposition || 'respond') === 'respond'
+    );
+    if (!command) return;
+
+    const authorName = command.author?.username || 'Vel';
+    const activityDebug = {
+      authorId: command.author?.id || command.author_id,
+      engagement: command.engagement,
+      mentionIds: command.mention_ids,
+      referencedAuthorId: command.referenced_author_id,
+      attachments: command.attachments,
+    };
+    try {
+      const runnerResponse = await this.runKaiNexusRunner(command.id, true, 'autorespond');
+      if (!runnerResponse.ok) {
+        const errorText = await runnerResponse.text().catch(() => '');
+        this.logActivity(command.companion_id, 'runner_failed', command.channel_id, errorText || `Nexus runner returned ${runnerResponse.status}`, authorName, command.message_id, undefined, activityDebug);
+        this.deleteCommand(command.id);
+      }
+    } catch (error) {
+      this.logActivity(command.companion_id, 'runner_failed', command.channel_id, error instanceof Error ? error.message : String(error), authorName, command.message_id, undefined, activityDebug);
+      this.deleteCommand(command.id);
+    }
+
+    const hasMoreKaiPending = this.getPending().some(cmd =>
+      normalizeDiscordCompanionId(cmd.companion_id) === 'kai'
+      && String(cmd.disposition || 'respond') === 'respond'
+    );
+    if (hasMoreKaiPending) await this.scheduleKaiAutoresponder(1000);
+  }
+
+  async alarm() {
+    await this.serviceKaiAutoresponderQueue();
+  }
+
   private async getKaiModelOverride(): Promise<string | null> {
     const stored = await this.ctx.storage.get<string>(KAI_MODEL_OVERRIDE_STORAGE_KEY);
     return stored ? normalizeKaiModelOverride(stored) : null;
@@ -4076,15 +4131,7 @@ export class CompanionBot extends McpAgent<Env> {
                 const activityDebug = { authorId: msg.author?.id, engagement, mentionIds, attachments, createdAt: msg.timestamp };
                 this.logActivity(companion.id, 'queued', channelId, msg.content, authorName, msg.id, undefined, activityDebug);
                 totalStored++;
-                try {
-                  const runnerResponse = await this.runKaiNexusRunner(command.id, isKaiDeliveryEnabled(this.env), 'autorespond');
-                  if (!runnerResponse.ok) {
-                    const errorText = await runnerResponse.text().catch(() => '');
-                    this.logActivity(companion.id, 'runner_failed', channelId, errorText || `Kai social runner returned ${runnerResponse.status}`, authorName, msg.id, undefined, activityDebug);
-                  }
-                } catch (error) {
-                  this.logActivity(companion.id, 'runner_failed', channelId, error instanceof Error ? error.message : String(error), authorName, msg.id, undefined, activityDebug);
-                }
+                await this.scheduleKaiAutoresponder();
                 console.log(`Cron: ${companion.name} social ${engagement.trigger_reason} by "${msg.content}" from ${authorName}`);
                 continue;
               }
@@ -4150,15 +4197,7 @@ export class CompanionBot extends McpAgent<Env> {
               const activityDebug = { authorId: msg.author?.id, engagement, mentionIds, referencedAuthorId, attachments, createdAt: msg.timestamp };
               this.logActivity(companion.id, 'queued', channelId, msg.content, authorName, msg.id, undefined, activityDebug);
               totalStored++;
-              try {
-                const runnerResponse = await this.runKaiNexusRunner(command.id, true, 'autorespond');
-                if (!runnerResponse.ok) {
-                  const errorText = await runnerResponse.text().catch(() => '');
-                  this.logActivity(companion.id, 'runner_failed', channelId, errorText || `Nexus runner returned ${runnerResponse.status}`, authorName, msg.id, undefined, activityDebug);
-                }
-              } catch (error) {
-                this.logActivity(companion.id, 'runner_failed', channelId, error instanceof Error ? error.message : String(error), authorName, msg.id, undefined, activityDebug);
-              }
+              await this.scheduleKaiAutoresponder();
               console.log(`Cron: ${companion.name} direct Nexus runner (${engagement.trigger_reason}) by "${msg.content}" from ${authorName}`);
               continue;
             }

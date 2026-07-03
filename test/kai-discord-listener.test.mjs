@@ -248,6 +248,9 @@ test('Kai Nexus runner stays guarded behind explicit flags and wake leases', () 
   assert.doesNotMatch(source, /skipContinuity: true/);
   assert.match(source, /timestamp: Date\.parse\(msg\.timestamp\) \|\| Date\.now\(\)/);
   assert.match(source, /\/wake-candidates\/\$\{encodeURIComponent\(String\(claimData\.wake_candidate\.id\)\)\}\/response/);
+  assert.match(source, /private async scheduleKaiAutoresponder\(delayMs = 1000\)/);
+  assert.match(source, /await this\.ctx\.storage\.setAlarm\(target\)/);
+  assert.match(source, /async alarm\(\) \{[\s\S]+await this\.serviceKaiAutoresponderQueue\(\)/);
 });
 
 test('Kai generated images are normalized, delivered to Discord, and logged with Continuity', () => {
@@ -347,7 +350,9 @@ test('Kai OCR can use images from the replied-to Discord message', () => {
 
 test('Kai bypasses legacy Kairos trigger path and legacy send tools', () => {
   assert.match(source, /direct-nexus-hard-mention/);
-  assert.match(source, /runKaiNexusRunner\(command\.id, true, 'autorespond'\)/);
+  assert.match(source, /await this\.scheduleKaiAutoresponder\(\)/);
+  assert.match(source, /serviceKaiAutoresponderQueue\(\)[\s\S]+runKaiNexusRunner\(command\.id, true, 'autorespond'\)/);
+  assert.match(source, /String\(cmd\.trigger_reason \|\| ''\) === 'direct-nexus-hard-mention'/);
   assert.match(source, /Cron: logged Kai transcript and skipped legacy Kai path/);
   assert.match(source, /Legacy pending_commands respond is disabled for Kai/);
   assert.match(source, /Legacy companion send is disabled for Kai/);
