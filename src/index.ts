@@ -2689,6 +2689,38 @@ export class CompanionBot extends McpAgent<Env> {
     await this.ctx.storage.delete(this.kaiAutoresponderRetryKey(commandId)).catch(() => null);
   }
 
+  private async recordKaiRunnerStatus(command: PendingCommand, status: Record<string, unknown>) {
+    await this.ctx.storage.put('kai:last_runner_result', {
+      request_id: command.id,
+      message_id: command.message_id || null,
+      channel_id: command.channel_id,
+      author_id: command.author?.id || command.author_id || null,
+      trigger_reason: command.trigger_reason || command.engagement?.trigger_reason || null,
+      priority: command.priority || null,
+      ...status,
+      updated_at: new Date().toISOString(),
+    }).catch(() => null);
+  }
+
+  private async kaiPendingDiagnostics(pending: PendingCommand[]): Promise<Record<string, unknown>[]> {
+    const diagnostics: Record<string, unknown>[] = [];
+    for (const command of pending) {
+      if (normalizeDiscordCompanionId(command.companion_id) !== 'kai') continue;
+      diagnostics.push({
+        request_id: command.id,
+        message_id: command.message_id || null,
+        channel_id: command.channel_id,
+        author_id: command.author?.id || command.author_id || null,
+        age_seconds: Math.max(0, Math.round((Date.now() - command.timestamp) / 1000)),
+        disposition: command.disposition || 'respond',
+        trigger_reason: command.trigger_reason || command.engagement?.trigger_reason || null,
+        priority: command.priority || null,
+        retry_count: await this.getKaiAutoresponderRetryCount(command.id),
+      });
+    }
+    return diagnostics;
+  }
+
   private async scheduleKaiAutoresponder(delayMs = 1000) {
     if (!isKaiListenerEnabled(this.env) || !isKaiDeliveryEnabled(this.env)) return;
     try {
@@ -2709,7 +2741,19 @@ export class CompanionBot extends McpAgent<Env> {
 
     const nextRetry = currentRetries + 1;
     const delayMs = kaiAutoresponderRetryDelayMs(nextRetry);
+    const nextRetryAt = new Date(Date.now() + delayMs).toISOString();
     await this.ctx.storage.put(this.kaiAutoresponderRetryKey(command.id), nextRetry).catch(() => null);
+    await this.recordKaiRunnerStatus(command, {
+      ok: false,
+      mode: 'runner_retry_scheduled',
+      status,
+      error: errorText || `Nexus runner returned ${status || 'an unknown transient error'}`,
+      transient: true,
+      retry_count: nextRetry,
+      max_retries: KAI_AUTORESPONDER_MAX_TRANSIENT_RETRIES,
+      next_retry_delay_ms: delayMs,
+      next_retry_at: nextRetryAt,
+    });
     this.logActivity(
       command.companion_id,
       'runner_retry',
@@ -2745,6 +2789,15 @@ export class CompanionBot extends McpAgent<Env> {
       if (!runnerResponse.ok) {
         const errorText = await runnerResponse.text().catch(() => '');
         if (await this.retryKaiAutoresponderAfterTransientFailure(command, runnerResponse.status, errorText, authorName, activityDebug)) return;
+        await this.recordKaiRunnerStatus(command, {
+          ok: false,
+          mode: 'runner_failed',
+          status: runnerResponse.status,
+          error: errorText || `Nexus runner returned ${runnerResponse.status}`,
+          transient: false,
+          retry_count: await this.getKaiAutoresponderRetryCount(command.id),
+          max_retries: KAI_AUTORESPONDER_MAX_TRANSIENT_RETRIES,
+        });
         this.logActivity(command.companion_id, 'runner_failed', command.channel_id, errorText || `Nexus runner returned ${runnerResponse.status}`, authorName, command.message_id, undefined, activityDebug);
         await this.clearKaiAutoresponderRetryCount(command.id);
         this.deleteCommand(command.id);
@@ -2754,6 +2807,15 @@ export class CompanionBot extends McpAgent<Env> {
     } catch (error) {
       const errorText = error instanceof Error ? error.message : String(error);
       if (await this.retryKaiAutoresponderAfterTransientFailure(command, null, errorText, authorName, activityDebug)) return;
+      await this.recordKaiRunnerStatus(command, {
+        ok: false,
+        mode: 'runner_failed',
+        status: null,
+        error: errorText,
+        transient: false,
+        retry_count: await this.getKaiAutoresponderRetryCount(command.id),
+        max_retries: KAI_AUTORESPONDER_MAX_TRANSIENT_RETRIES,
+      });
       this.logActivity(command.companion_id, 'runner_failed', command.channel_id, errorText, authorName, command.message_id, undefined, activityDebug);
       await this.clearKaiAutoresponderRetryCount(command.id);
       this.deleteCommand(command.id);
@@ -2847,12 +2909,12 @@ export class CompanionBot extends McpAgent<Env> {
       const runnerVision = kaiRunnerVisionSummary(runnerResult);
       const runnerWorkspace = kaiRunnerWorkspaceSummary(runnerResult);
       const runnerSource = kaiRunnerSource(runnerResult);
-      await this.ctx.storage.put('kai:last_runner_result', {
-        request_id: requestId,
+      await this.recordKaiRunnerStatus(command, {
+        ok: true,
+        mode: 'runner_result_received',
+        runner_origin: origin,
         continuity_event_id: claimData.event_id,
         wake_candidate_id: claimData.wake_candidate?.id || null,
-        message_id: command.message_id || null,
-        channel_id: command.channel_id,
         runner_source: runnerSource,
         generated: runnerResult?.generated === true,
         response_present: Boolean(String(runnerResult?.response || '').trim()),
@@ -2861,8 +2923,7 @@ export class CompanionBot extends McpAgent<Env> {
         generation: runnerGenerationSummary(runnerResult),
         vision: runnerVision,
         workspace: runnerWorkspace,
-        updated_at: new Date().toISOString(),
-      }).catch(() => null);
+      });
       const generatedResponse = String(runnerResult.response || '').trim();
       const generatedImages = kaiGeneratedDiscordImages(runnerResult);
       const deliveryResponse = generatedResponse || (generatedImages.length ? KAI_IMAGE_FALLBACK_RESPONSE : '');
@@ -2876,6 +2937,15 @@ export class CompanionBot extends McpAgent<Env> {
           sentReactions.push(emoji);
         }
         await releaseWakeCandidate(this.env, claimData.wake_candidate.id, runnerId, `social engagement decision: ${decision}`).catch(() => null);
+        await this.recordKaiRunnerStatus(command, {
+          ok: true,
+          mode: decision === 'react' ? 'social_reaction' : 'social_silence',
+          runner_origin: origin,
+          continuity_event_id: claimData.event_id,
+          wake_candidate_id: claimData.wake_candidate.id,
+          decision,
+          sent_reactions: sentReactions,
+        });
         this.logActivity(command.companion_id, decision === 'react' ? 'responded' : 'ignored', command.channel_id, `Social engagement decision: ${decision}`, command.author.username, command.message_id, undefined, {
           authorId: command.author?.id || command.author_id,
           engagement: command.engagement,
@@ -2899,6 +2969,17 @@ export class CompanionBot extends McpAgent<Env> {
         const failureMessage = runnerGenerationFailureMessage(runnerResult);
         await releaseWakeCandidate(this.env, claimData.wake_candidate.id, runnerId, requiredReply ? failureMessage : 'nexus dry-run contract; no text generation yet').catch(() => null);
         if (requiredReply && deliver) {
+          await this.recordKaiRunnerStatus(command, {
+            ok: false,
+            mode: 'required_reply_generation_failed',
+            status: 502,
+            error: failureMessage,
+            transient: isTransientKaiRunnerServiceError(502, failureMessage),
+            runner_origin: origin,
+            continuity_event_id: claimData.event_id,
+            wake_candidate_id: claimData.wake_candidate.id,
+            generation: runnerGenerationSummary(runnerResult),
+          });
           return new Response(JSON.stringify({
             ok: false,
             mode: 'required_reply_generation_failed',
@@ -2925,6 +3006,16 @@ export class CompanionBot extends McpAgent<Env> {
       const blockedReason = kaiDriftReason || unsafeReason;
       if (blockedReason) {
         await releaseWakeCandidate(this.env, claimData.wake_candidate.id, runnerId, `dashboard blocked: ${blockedReason}`).catch(() => null);
+        await this.recordKaiRunnerStatus(command, {
+          ok: false,
+          mode: deliver ? 'delivery_blocked' : 'dry_run_preview',
+          blocked_reason: blockedReason,
+          runner_origin: origin,
+          continuity_event_id: claimData.event_id,
+          wake_candidate_id: claimData.wake_candidate.id,
+          runner_source: runnerSource,
+          response_present: Boolean(deliveryResponse),
+        });
         return new Response(JSON.stringify({
           ok: false,
           mode: deliver ? 'delivery_blocked' : 'dry_run_preview',
@@ -2938,6 +3029,16 @@ export class CompanionBot extends McpAgent<Env> {
       }
       if (!deliver) {
         await releaseWakeCandidate(this.env, claimData.wake_candidate.id, runnerId, 'dashboard dry-run preview; no surface delivery').catch(() => null);
+        await this.recordKaiRunnerStatus(command, {
+          ok: true,
+          mode: 'dry_run_preview',
+          runner_origin: origin,
+          continuity_event_id: claimData.event_id,
+          wake_candidate_id: claimData.wake_candidate.id,
+          runner_source: runnerSource,
+          response_present: Boolean(deliveryResponse),
+          generated_images: generatedImages,
+        });
         return new Response(JSON.stringify({
           ok: true,
           mode: 'dry_run_preview',
@@ -2950,6 +3051,18 @@ export class CompanionBot extends McpAgent<Env> {
       }
       if (!isKaiDeliveryEnabled(this.env)) {
         await releaseWakeCandidate(this.env, claimData.wake_candidate.id, runnerId, 'dashboard delivery requested but disabled').catch(() => null);
+        await this.recordKaiRunnerStatus(command, {
+          ok: false,
+          mode: 'delivery_disabled',
+          status: 409,
+          error: 'Kai generated a response, but Discord delivery is disabled.',
+          runner_origin: origin,
+          continuity_event_id: claimData.event_id,
+          wake_candidate_id: claimData.wake_candidate.id,
+          runner_source: runnerSource,
+          response_present: Boolean(deliveryResponse),
+          generated_images: generatedImages,
+        });
         return new Response(JSON.stringify({
           ok: false,
           mode: 'delivery_disabled',
@@ -3025,22 +3138,22 @@ export class CompanionBot extends McpAgent<Env> {
           },
         }),
       });
-      const lastRunnerResult = await this.ctx.storage.get('kai:last_runner_result').catch(() => null) as Record<string, unknown> | null;
-      await this.ctx.storage.put('kai:last_runner_result', {
-        ...(lastRunnerResult && typeof lastRunnerResult === 'object' ? lastRunnerResult : {}),
-        request_id: requestId,
+      await this.recordKaiRunnerStatus(command, {
+        ok: true,
+        mode: 'delivered',
         continuity_event_id: claimData.event_id,
         wake_candidate_id: claimData.wake_candidate?.id || null,
         continuity_response_event_id: continuityResponse?.event?.id || null,
         runner_source: runnerSource,
+        runner_origin: origin,
+        response_present: Boolean(deliveryResponse),
         sent_message_ids: allSentMessageIds,
         sent_text_message_ids: sentMessageIds,
         sent_image_message_ids: sentImageMessageIds,
         generated_images: generatedImageMetadata,
         workspace: runnerWorkspace,
         continuity_metadata_recorded: Boolean(continuityResponse?.event?.id || allSentMessageIds.length),
-        updated_at: new Date().toISOString(),
-      }).catch(() => null);
+      });
       this.logActivity(command.companion_id, 'responded', command.channel_id, deliveryResponse, companion.name, allSentMessageIds[allSentMessageIds.length - 1], sentWebhookUrl);
       this.markResponded(command.channel_id, command.author?.id, command.message_id, 'nexus-dashboard-runner');
       this.deleteCommand(requestId);
@@ -3060,12 +3173,23 @@ export class CompanionBot extends McpAgent<Env> {
         response: deliveryResponse,
       }, null, 2), { headers: { 'Content-Type': 'application/json' } });
     } catch (error) {
+      const errorText = error instanceof Error ? error.message : String(error);
       if (claimData?.wake_candidate?.id) {
-        await releaseWakeCandidate(this.env, claimData.wake_candidate.id, runnerId, error instanceof Error ? error.message : String(error)).catch(() => null);
+        await releaseWakeCandidate(this.env, claimData.wake_candidate.id, runnerId, errorText).catch(() => null);
       }
+      await this.recordKaiRunnerStatus(command, {
+        ok: false,
+        mode: 'runner_exception',
+        status: 500,
+        error: errorText,
+        transient: isTransientKaiRunnerServiceError(500, errorText),
+        runner_origin: origin,
+        continuity_event_id: claimData?.event_id || null,
+        wake_candidate_id: claimData?.wake_candidate?.id || null,
+      });
       return new Response(JSON.stringify({
         ok: false,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorText,
       }), { status: 500, headers: { 'Content-Type': 'application/json' } });
     }
   }
@@ -3888,6 +4012,10 @@ export class CompanionBot extends McpAgent<Env> {
       const watchChannels = monitors.map(m => m.channel_id);
       const lastPollDebug = await this.ctx.storage.get('last_poll_debug');
       const lastKaiRunnerResult = await this.ctx.storage.get('kai:last_runner_result');
+      const kaiPending = await this.kaiPendingDiagnostics(pending);
+      const lastKaiFailure = this.getActivity('kai', 50).find(activity =>
+        ['runner_retry', 'runner_failed', 'expired'].includes(String(activity.type || ''))
+      ) || null;
 
       // Fetch server list and channel names
       let servers: any[] = [];
@@ -3939,6 +4067,16 @@ export class CompanionBot extends McpAgent<Env> {
         watch_channels: channelDetails,
         monitors,
         servers,
+        kai_pending: kaiPending,
+        last_kai_failure: lastKaiFailure ? {
+          type: lastKaiFailure.type,
+          channel_id: lastKaiFailure.channel_id || null,
+          message_id: lastKaiFailure.message_id || null,
+          author: lastKaiFailure.author || null,
+          age_seconds: lastKaiFailure.age_seconds,
+          content_preview: String(lastKaiFailure.content || '').slice(0, 300),
+          engagement: lastKaiFailure.engagement || null,
+        } : null,
         last_poll_debug: lastPollDebug || null,
         last_kai_runner_result: lastKaiRunnerResult || null,
       }, null, 2), {

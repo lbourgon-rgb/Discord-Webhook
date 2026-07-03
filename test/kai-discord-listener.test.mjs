@@ -270,8 +270,20 @@ test('Kai autoresponder retries transient runner failures before dropping requir
   assert.match(source, /retryKaiAutoresponderAfterTransientFailure\(command, runnerResponse\.status, errorText, authorName, activityDebug\)/);
   assert.match(source, /retryKaiAutoresponderAfterTransientFailure\(command, null, errorText, authorName, activityDebug\)/);
   assert.match(source, /'runner_retry'/);
+  assert.match(source, /mode: 'runner_retry_scheduled'/);
+  assert.match(source, /mode: 'runner_exception'/);
+  assert.match(source, /recordKaiRunnerStatus\(command/);
   assert.match(source, /await this\.clearKaiAutoresponderRetryCount\(command\.id\)/);
   assert.match(source, /this\.deleteCommand\(command\.id\)/);
+});
+
+test('Kai status exposes pending retry diagnostics and latest failure', () => {
+  assert.match(source, /private async kaiPendingDiagnostics\(pending: PendingCommand\[\]\)/);
+  assert.match(source, /retry_count: await this\.getKaiAutoresponderRetryCount\(command\.id\)/);
+  assert.match(source, /const kaiPending = await this\.kaiPendingDiagnostics\(pending\)/);
+  assert.match(source, /const lastKaiFailure = this\.getActivity\('kai', 50\)\.find/);
+  assert.match(source, /kai_pending: kaiPending/);
+  assert.match(source, /last_kai_failure: lastKaiFailure/);
 });
 
 test('Kai generated images are normalized, delivered to Discord, and logged with Continuity', () => {
