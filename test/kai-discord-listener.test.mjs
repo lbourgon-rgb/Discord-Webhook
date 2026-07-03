@@ -229,8 +229,9 @@ test('Kai Nexus runner stays guarded behind explicit flags and wake leases', () 
   assert.match(source, /callKaiRunnerWithFallback\(this\.env/);
   assert.match(source, /KAI_NEXUS_RUNNER_DEFAULT_MODEL = 'z-ai\/glm-5\.2'/);
   assert.match(source, /KAI_NEXUS_RUNNER_FALLBACK_MODELS/);
-  assert.match(source, /KAI_NEXUS_RUNNER_FALLBACK_MODELS = \['deepseek\/deepseek-v4-flash'\]/);
-  assert.doesNotMatch(source, /openai\/gpt-5-mini/);
+  assert.match(source, /KAI_NEXUS_RUNNER_FALLBACK_MODELS: string\[\] = \[\]/);
+  assert.match(source, /backup_model: this\.env\.KAI_BACKUP_MODEL \|\| KAI_NEXUS_RUNNER_FALLBACK_MODELS\[0\] \|\| null/);
+  assert.doesNotMatch(source, /deepseek\/deepseek-v4-flash|openai\/gpt-5-mini/);
   assert.match(source, /currently at capacity\|overloaded\|rate limit\|temporarily unavailable\|returned no choices\|timed out/);
   assert.match(source, /data\.generated === false/);
   assert.match(source, /nexus runner generation failed/);

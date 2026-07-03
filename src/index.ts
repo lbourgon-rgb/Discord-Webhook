@@ -20,7 +20,7 @@ import { triggerLucienWorkspaceAgent } from "./lucien-chatgpt-runner";
 
 const DISCORD_API = 'https://discord.com/api/v10';
 const KAI_NEXUS_RUNNER_DEFAULT_MODEL = 'z-ai/glm-5.2';
-const KAI_NEXUS_RUNNER_FALLBACK_MODELS = ['deepseek/deepseek-v4-flash'];
+const KAI_NEXUS_RUNNER_FALLBACK_MODELS: string[] = [];
 const DEFAULT_KAI_DISCORD_USER_ID = '1447789482253484175';
 const KAI_MODEL_OVERRIDE_STORAGE_KEY = 'kai:model_override';
 const KAI_MODEL_ID_PATTERN = /^[a-z0-9][a-z0-9._:/-]{1,119}$/i;
@@ -2732,7 +2732,7 @@ export class CompanionBot extends McpAgent<Env> {
       companion_id: 'kai',
       model_override: modelOverride,
       default_model: defaultModel,
-      backup_model: this.env.KAI_BACKUP_MODEL || KAI_NEXUS_RUNNER_FALLBACK_MODELS[0],
+      backup_model: this.env.KAI_BACKUP_MODEL || KAI_NEXUS_RUNNER_FALLBACK_MODELS[0] || null,
       active_model: modelOverride || defaultModel,
       runner_route: 'nexus',
     };
