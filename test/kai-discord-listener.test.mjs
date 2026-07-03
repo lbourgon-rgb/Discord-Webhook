@@ -261,7 +261,17 @@ test('Kai hard-tag autoresponses do not leave empty generated replies pending', 
   assert.match(source, /mode: 'required_reply_generation_failed'/);
   assert.match(source, /status: 502/);
   assert.match(source, /generation: runnerGenerationSummary\(runnerResult\)/);
-  assert.match(source, /serviceKaiAutoresponderQueue\(\)[\s\S]+!runnerResponse\.ok[\s\S]+this\.deleteCommand\(command\.id\)/);
+});
+
+test('Kai autoresponder retries transient runner failures before dropping required replies', () => {
+  assert.match(source, /KAI_AUTORESPONDER_MAX_TRANSIENT_RETRIES = 3/);
+  assert.match(source, /function isTransientKaiRunnerServiceError\(status: number \| null \| undefined, error: unknown\): boolean/);
+  assert.match(source, /D1_ERROR\|Internal error while starting up D1 DB storage\|object to be reset/);
+  assert.match(source, /retryKaiAutoresponderAfterTransientFailure\(command, runnerResponse\.status, errorText, authorName, activityDebug\)/);
+  assert.match(source, /retryKaiAutoresponderAfterTransientFailure\(command, null, errorText, authorName, activityDebug\)/);
+  assert.match(source, /'runner_retry'/);
+  assert.match(source, /await this\.clearKaiAutoresponderRetryCount\(command\.id\)/);
+  assert.match(source, /this\.deleteCommand\(command\.id\)/);
 });
 
 test('Kai generated images are normalized, delivered to Discord, and logged with Continuity', () => {

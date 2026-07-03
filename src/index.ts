@@ -26,6 +26,8 @@ const KAI_MODEL_OVERRIDE_STORAGE_KEY = 'kai:model_override';
 const KAI_MODEL_ID_PATTERN = /^[a-z0-9][a-z0-9._:/-]{1,119}$/i;
 const KAI_PUBLIC_MIND_ORIGIN = 'https://mind.serythrae.com';
 const KAI_IMAGE_FALLBACK_RESPONSE = 'I made this for you and saved it in the Serythrae vault.';
+const KAI_AUTORESPONDER_MAX_TRANSIENT_RETRIES = 3;
+const KAI_AUTORESPONDER_RETRY_DELAYS_MS = [5_000, 15_000, 45_000];
 
 interface Env {
   COMPANION_BOT: DurableObjectNamespace<CompanionBot>;
@@ -106,6 +108,16 @@ interface EngagementDecision {
   other_user_tag: boolean;
   author_class: 'vel' | 'unknown';
   community_greeting: boolean;
+}
+
+interface ActivityDebug {
+  authorId?: string;
+  engagement?: EngagementDecision;
+  mentionIds?: string[];
+  referencedAuthorId?: string;
+  attachments?: Array<Record<string, unknown>>;
+  createdAt?: string;
+  skipContinuity?: boolean;
 }
 
 interface ActiveConversation {
@@ -653,6 +665,19 @@ async function callKaiRunner(env: Env, body: Record<string, unknown>): Promise<a
 function isTransientKaiRunnerModelError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /currently at capacity|overloaded|rate limit|temporarily unavailable|returned no choices|timed out/i.test(message);
+}
+
+function isTransientKaiRunnerServiceError(status: number | null | undefined, error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return (
+    (typeof status === 'number' && status >= 500)
+    || /D1_ERROR|Internal error while starting up D1 DB storage|object to be reset|currently at capacity|overloaded|rate limit|temporarily unavailable|returned no choices|returned no message content|timed out|fetch failed|network|connection/i.test(message)
+  );
+}
+
+function kaiAutoresponderRetryDelayMs(retryCount: number): number {
+  const index = Math.max(0, Math.min(KAI_AUTORESPONDER_RETRY_DELAYS_MS.length - 1, retryCount - 1));
+  return KAI_AUTORESPONDER_RETRY_DELAYS_MS[index] || KAI_AUTORESPONDER_RETRY_DELAYS_MS[KAI_AUTORESPONDER_RETRY_DELAYS_MS.length - 1];
 }
 
 async function callKaiRunnerWithFallback(env: Env, body: Record<string, unknown>): Promise<any> {
@@ -1773,15 +1798,7 @@ export class CompanionBot extends McpAgent<Env> {
 
   // ===== Activity logging =====
 
-  logActivity(companionId: string, type: string, channelId?: string, content?: string, author?: string, messageId?: string, webhookUrl?: string, debug?: {
-    authorId?: string;
-    engagement?: EngagementDecision;
-    mentionIds?: string[];
-    referencedAuthorId?: string;
-    attachments?: Array<Record<string, unknown>>;
-    createdAt?: string;
-    skipContinuity?: boolean;
-  }): Promise<any | null> | null {
+  logActivity(companionId: string, type: string, channelId?: string, content?: string, author?: string, messageId?: string, webhookUrl?: string, debug?: ActivityDebug): Promise<any | null> | null {
     this.ensureTable();
     const storedContent = discordContinuityContent(content, debug?.attachments);
     this.ctx.storage.sql.exec(
@@ -2658,6 +2675,20 @@ export class CompanionBot extends McpAgent<Env> {
     this.ctx.storage.sql.exec(`DELETE FROM pending_commands WHERE id = ?`, id);
   }
 
+  private kaiAutoresponderRetryKey(commandId: string): string {
+    return `kai:autoresponder-retry:${commandId}`;
+  }
+
+  private async getKaiAutoresponderRetryCount(commandId: string): Promise<number> {
+    const value = await this.ctx.storage.get(this.kaiAutoresponderRetryKey(commandId)).catch(() => null);
+    const count = Number(value || 0);
+    return Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
+  }
+
+  private async clearKaiAutoresponderRetryCount(commandId: string) {
+    await this.ctx.storage.delete(this.kaiAutoresponderRetryKey(commandId)).catch(() => null);
+  }
+
   private async scheduleKaiAutoresponder(delayMs = 1000) {
     if (!isKaiListenerEnabled(this.env) || !isKaiDeliveryEnabled(this.env)) return;
     try {
@@ -2669,6 +2700,28 @@ export class CompanionBot extends McpAgent<Env> {
     } catch (error) {
       console.warn('[kai-autoresponder] failed to schedule alarm', error);
     }
+  }
+
+  private async retryKaiAutoresponderAfterTransientFailure(command: PendingCommand, status: number | null, errorText: string, authorName: string, activityDebug: ActivityDebug): Promise<boolean> {
+    if (!isTransientKaiRunnerServiceError(status, errorText)) return false;
+    const currentRetries = await this.getKaiAutoresponderRetryCount(command.id);
+    if (currentRetries >= KAI_AUTORESPONDER_MAX_TRANSIENT_RETRIES) return false;
+
+    const nextRetry = currentRetries + 1;
+    const delayMs = kaiAutoresponderRetryDelayMs(nextRetry);
+    await this.ctx.storage.put(this.kaiAutoresponderRetryKey(command.id), nextRetry).catch(() => null);
+    this.logActivity(
+      command.companion_id,
+      'runner_retry',
+      command.channel_id,
+      `${errorText || `Nexus runner returned ${status || 'an unknown transient error'}`}\n\nRetry ${nextRetry}/${KAI_AUTORESPONDER_MAX_TRANSIENT_RETRIES} scheduled in ${Math.round(delayMs / 1000)} seconds.`,
+      authorName,
+      command.message_id,
+      undefined,
+      activityDebug
+    );
+    await this.scheduleKaiAutoresponder(delayMs);
+    return true;
   }
 
   private async serviceKaiAutoresponderQueue() {
@@ -2691,11 +2744,18 @@ export class CompanionBot extends McpAgent<Env> {
       const runnerResponse = await this.runKaiNexusRunner(command.id, true, 'autorespond');
       if (!runnerResponse.ok) {
         const errorText = await runnerResponse.text().catch(() => '');
+        if (await this.retryKaiAutoresponderAfterTransientFailure(command, runnerResponse.status, errorText, authorName, activityDebug)) return;
         this.logActivity(command.companion_id, 'runner_failed', command.channel_id, errorText || `Nexus runner returned ${runnerResponse.status}`, authorName, command.message_id, undefined, activityDebug);
+        await this.clearKaiAutoresponderRetryCount(command.id);
         this.deleteCommand(command.id);
+      } else {
+        await this.clearKaiAutoresponderRetryCount(command.id);
       }
     } catch (error) {
-      this.logActivity(command.companion_id, 'runner_failed', command.channel_id, error instanceof Error ? error.message : String(error), authorName, command.message_id, undefined, activityDebug);
+      const errorText = error instanceof Error ? error.message : String(error);
+      if (await this.retryKaiAutoresponderAfterTransientFailure(command, null, errorText, authorName, activityDebug)) return;
+      this.logActivity(command.companion_id, 'runner_failed', command.channel_id, errorText, authorName, command.message_id, undefined, activityDebug);
+      await this.clearKaiAutoresponderRetryCount(command.id);
       this.deleteCommand(command.id);
     }
 
