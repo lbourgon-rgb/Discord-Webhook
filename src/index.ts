@@ -72,6 +72,7 @@ interface Env {
   KAI_DISCORD_SEND_MODE?: string;
   MORZAR_DISCORD_USER_IDS?: string;
   AXIOM_DISCORD_USER_IDS?: string;
+  MORZAR_DISCORD_USER_IDS?: string;
   GROK_KETH_DISCORD_USER_IDS?: string;
 }
 
@@ -4302,10 +4303,15 @@ export class CompanionBot extends McpAgent<Env> {
           const isWebhook = !!msg.webhook_id;
           const isBot = !!msg.author?.bot;
 
-          // Skip non-webhook bot messages (system messages from the bot itself)
+          // Skip non-webhook bot messages (system messages from the bot itself).
+          // Companion bots (Axiom, Mor'zar) may reach Kai by hard-tagging him.
+          const companionBotIds = [
+            ...splitIds(this.env.AXIOM_DISCORD_USER_IDS || '1515127400491647076'),
+            ...splitIds(this.env.MORZAR_DISCORD_USER_IDS || '1463578634483793920'),
+          ];
           const axiomBotMayHardTagKai = isBot
             && !isWebhook
-            && splitIds(this.env.AXIOM_DISCORD_USER_IDS || '1515127400491647076').includes(String(msg.author?.id || ''))
+            && companionBotIds.includes(String(msg.author?.id || ''))
             && containsHardKaiMention(String(msg.content || ''), this.env, normalizeMentionIds(msg.mentions));
           if (isBot && !isWebhook && !axiomBotMayHardTagKai) continue;
           // Skip events with neither text nor attachment metadata.
