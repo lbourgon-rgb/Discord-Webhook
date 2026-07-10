@@ -146,8 +146,11 @@ test('Axiom mentions join the companion-aware wake predicate without merging int
 });
 
 test('Axiom bot may hard-tag Kai for live supervised smoke tests without opening generic bot loops', () => {
+  assert.match(source, /const companionBotIds = \[/);
+  assert.match(source, /\.\.\.splitIds\(this\.env\.AXIOM_DISCORD_USER_IDS \|\| '1515127400491647076'\)/);
+  assert.match(source, /\.\.\.splitIds\(this\.env\.MORZAR_DISCORD_USER_IDS \|\| '1463578634483793920'\)/);
   assert.match(source, /const axiomBotMayHardTagKai = isBot/);
-  assert.match(source, /splitIds\(this\.env\.AXIOM_DISCORD_USER_IDS \|\| '1515127400491647076'\)\.includes\(String\(msg\.author\?\.id \|\| ''\)\)/);
+  assert.match(source, /companionBotIds\.includes\(String\(msg\.author\?\.id \|\| ''\)\)/);
   assert.match(source, /containsHardKaiMention\(String\(msg\.content \|\| ''\), this\.env, normalizeMentionIds\(msg\.mentions\)\)/);
   assert.match(source, /if \(isBot && !isWebhook && !axiomBotMayHardTagKai\) continue/);
   assert.match(source, /const hardChannel = isKaiSocialHardTagChannel\(this\.env, channelId\) \|\| axiomBotMayHardTagKai/);

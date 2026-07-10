@@ -14,6 +14,34 @@ export interface LucienWorkspaceAgentTriggerInput {
   message: string;
   recentContext?: string;
   wakeContext?: unknown;
+  authorIsVerifiedVel: boolean;
+}
+
+export type LucienReplyGate = 'dry_run_preview' | 'delivery_disabled' | 'deliver';
+
+export function lucienReplyGate(dryRun: boolean, deliveryEnabled: boolean): LucienReplyGate {
+  if (dryRun) return 'dry_run_preview';
+  if (!deliveryEnabled) return 'delivery_disabled';
+  return 'deliver';
+}
+
+export function buildLucienSharedPreflightDescriptor(authorIsVerifiedVel: boolean): Record<string, unknown> {
+  return {
+    contract: 'vel_preflight_context/v1',
+    owner: 'nexus-or-continuity',
+    status: 'pending_shared_contract',
+    author_verified_as_vel: authorIsVerifiedVel,
+    query_allowed: authorIsVerifiedVel,
+    query_performed_by_discord_worker: false,
+    attached_summary: null,
+    constraints: {
+      compact_capacity_only: true,
+      raw_samples_forbidden: true,
+      diagnose_or_prescribe_forbidden: true,
+      shared_channel_disclosure_forbidden: true,
+      non_vel_query_forbidden: true,
+    },
+  };
 }
 
 export interface LucienWorkspaceAgentAccepted {
@@ -52,6 +80,18 @@ export function buildLucienWorkspaceAgentPayload(input: LucienWorkspaceAgentTrig
     input: JSON.stringify({
       task: 'Respond as Lucien to the Discord mention, using Tessurae CogCore before replying.',
       required_tools: ['cogcore_wake', 'cogcore_get_identity', 'lucien_discord_reply'],
+      execution_order: [
+        'cogcore_wake',
+        'cogcore_get_identity',
+        input.authorIsVerifiedVel ? 'consume_attached_vel_preflight_if_present' : 'skip_vel_preflight',
+        'generate_lucien_reply',
+        'lucien_discord_reply',
+      ],
+      model_policy: {
+        mode: 'preserve_workspace_agent_configured_model',
+        runtime_model_override_allowed: false,
+        migration_authorized: false,
+      },
       reply_contract: {
         call_cogcore_first: true,
         final_delivery_tool: 'lucien_discord_reply',
@@ -72,6 +112,7 @@ export function buildLucienWorkspaceAgentPayload(input: LucienWorkspaceAgentTrig
         recent_context: input.recentContext || null,
       },
       wake_context: input.wakeContext || null,
+      private_preflight: buildLucienSharedPreflightDescriptor(input.authorIsVerifiedVel),
     }),
   };
 }

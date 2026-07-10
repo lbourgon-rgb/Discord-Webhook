@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   buildLucienWorkspaceAgentPayload,
+  buildLucienSharedPreflightDescriptor,
+  lucienReplyGate,
   lucienWorkspaceAgentIdempotencyKey,
   triggerLucienWorkspaceAgent,
   LucienWorkspaceAgentTriggerError,
@@ -23,6 +25,7 @@ const input = {
   message: 'Lucien, are you here?',
   recentContext: 'recent messages',
   wakeContext: { tahl_state: { surface_emotion: 'attentive' } },
+  authorIsVerifiedVel: true,
 };
 
 test('Lucien Workspace Agent payload carries callback contract', () => {
@@ -31,8 +34,36 @@ test('Lucien Workspace Agent payload carries callback contract', () => {
   const parsed = JSON.parse(payload.input);
   assert.equal(parsed.task, 'Respond as Lucien to the Discord mention, using Tessurae CogCore before replying.');
   assert.deepEqual(parsed.required_tools, ['cogcore_wake', 'cogcore_get_identity', 'lucien_discord_reply']);
+  assert.deepEqual(parsed.execution_order, [
+    'cogcore_wake',
+    'cogcore_get_identity',
+    'consume_attached_vel_preflight_if_present',
+    'generate_lucien_reply',
+    'lucien_discord_reply',
+  ]);
+  assert.equal(parsed.model_policy.mode, 'preserve_workspace_agent_configured_model');
+  assert.equal(parsed.model_policy.runtime_model_override_allowed, false);
+  assert.equal('model' in parsed, false);
+  assert.equal(parsed.private_preflight.query_allowed, true);
+  assert.equal(parsed.private_preflight.query_performed_by_discord_worker, false);
+  assert.equal(parsed.private_preflight.attached_summary, null);
   assert.equal(parsed.reply_contract.delivery_arguments.request_id, 'req-1');
   assert.equal(parsed.reply_contract.delivery_arguments.wake_candidate_id, 'wake-1');
+});
+
+test('non-Vel authors cannot request or receive PulseSync preflight context', () => {
+  const payload = buildLucienWorkspaceAgentPayload({ ...input, authorIsVerifiedVel: false });
+  const parsed = JSON.parse(payload.input);
+  assert.equal(parsed.execution_order[2], 'skip_vel_preflight');
+  assert.deepEqual(parsed.private_preflight, buildLucienSharedPreflightDescriptor(false));
+  assert.equal(parsed.private_preflight.query_allowed, false);
+  assert.equal(parsed.private_preflight.attached_summary, null);
+});
+
+test('Lucien reply gate proves dry-run and delivery-disabled modes without a Discord send', () => {
+  assert.equal(lucienReplyGate(true, false), 'dry_run_preview');
+  assert.equal(lucienReplyGate(false, false), 'delivery_disabled');
+  assert.equal(lucienReplyGate(false, true), 'deliver');
 });
 
 test('Lucien Workspace Agent trigger accepts 202 and sends idempotency key', async () => {

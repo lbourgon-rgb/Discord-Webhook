@@ -16,7 +16,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { Companion, SEED_COMPANIONS } from "./companions";
 import { renderDashboard, renderRegisterPage } from "./dashboard";
-import { triggerLucienWorkspaceAgent } from "./lucien-chatgpt-runner";
+import { lucienReplyGate, triggerLucienWorkspaceAgent } from "./lucien-chatgpt-runner";
 
 const DISCORD_API = 'https://discord.com/api/v10';
 const KAI_NEXUS_RUNNER_DEFAULT_MODEL = 'z-ai/glm-5.2';
@@ -72,7 +72,6 @@ interface Env {
   KAI_DISCORD_SEND_MODE?: string;
   MORZAR_DISCORD_USER_IDS?: string;
   AXIOM_DISCORD_USER_IDS?: string;
-  MORZAR_DISCORD_USER_IDS?: string;
   GROK_KETH_DISCORD_USER_IDS?: string;
 }
 
@@ -3232,6 +3231,7 @@ export class CompanionBot extends McpAgent<Env> {
         message: command.content,
         recentContext: command.recent_context,
         wakeContext: claimData.wake_context,
+        authorIsVerifiedVel: isVelDiscordAuthor(this.env, command.author?.id || command.author_id),
       });
       this.logActivity(command.companion_id, 'runner_handed_off', command.channel_id, `Lucien ChatGPT Workspace Agent accepted request ${requestId}.`, command.author?.username || 'chatgpt-runner', command.message_id, command.webhook_url, {
         authorId: command.author?.id || command.author_id,
@@ -3286,7 +3286,12 @@ export class CompanionBot extends McpAgent<Env> {
     const companion = this.getCompanionById(command.companion_id);
     if (!companion) throw new Error(`Unknown companion: ${command.companion_id}`);
 
-    if (args.dryRun) {
+    const replyGate = lucienReplyGate(
+      args.dryRun === true,
+      this.env.LUCIEN_CHATGPT_DELIVERY_ENABLED === 'true',
+    );
+
+    if (replyGate === 'dry_run_preview') {
       return {
         ok: true,
         mode: 'dry_run_preview',
@@ -3296,7 +3301,7 @@ export class CompanionBot extends McpAgent<Env> {
       };
     }
 
-    if (this.env.LUCIEN_CHATGPT_DELIVERY_ENABLED !== 'true') {
+    if (replyGate === 'delivery_disabled') {
       return {
         ok: false,
         mode: 'delivery_disabled',
