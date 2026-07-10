@@ -17,10 +17,10 @@ import { z } from "zod";
 import { Companion, SEED_COMPANIONS } from "./companions";
 import { renderDashboard, renderRegisterPage } from "./dashboard";
 import { lucienReplyGate, triggerLucienWorkspaceAgent } from "./lucien-chatgpt-runner";
+import { kaiRunnerPolicyForCommand } from "./kai-runner-policy";
 
 const DISCORD_API = 'https://discord.com/api/v10';
 const KAI_NEXUS_RUNNER_DEFAULT_MODEL = 'z-ai/glm-5.2';
-const KAI_NEXUS_RUNNER_FALLBACK_MODELS: string[] = [];
 const DEFAULT_KAI_DISCORD_USER_ID = '1447789482253484175';
 const KAI_MODEL_OVERRIDE_STORAGE_KEY = 'kai:model_override';
 const KAI_MODEL_ID_PATTERN = /^[a-z0-9][a-z0-9._:/-]{1,119}$/i;
@@ -681,26 +681,11 @@ function kaiAutoresponderRetryDelayMs(retryCount: number): number {
 }
 
 async function callKaiRunnerWithFallback(env: Env, body: Record<string, unknown>): Promise<any> {
-  const attempted = new Set<string>();
-  const models = [
-    body.model ? String(body.model) : (env.KAI_DEFAULT_MODEL || KAI_NEXUS_RUNNER_DEFAULT_MODEL),
-    ...(env.KAI_BACKUP_MODEL ? [env.KAI_BACKUP_MODEL] : KAI_NEXUS_RUNNER_FALLBACK_MODELS),
-  ].filter(Boolean);
-  let lastError: unknown = null;
-
-  for (const model of models) {
-    if (attempted.has(model)) continue;
-    attempted.add(model);
-    try {
-      return await callKaiRunner(env, { ...body, model });
-    } catch (error) {
-      lastError = error;
-      if (!isTransientKaiRunnerModelError(error)) throw error;
-      console.warn(`[kai-runner] ${model} failed transiently; trying fallback model`, error);
-    }
+  const requestedModel = body.model ? String(body.model) : (env.KAI_DEFAULT_MODEL || KAI_NEXUS_RUNNER_DEFAULT_MODEL);
+  if (requestedModel !== KAI_NEXUS_RUNNER_DEFAULT_MODEL) {
+    console.warn(`[kai-runner] ignoring model override ${requestedModel}; Kai is frozen to ${KAI_NEXUS_RUNNER_DEFAULT_MODEL}`);
   }
-
-  throw lastError instanceof Error ? lastError : new Error(String(lastError || 'Kai runner failed'));
+  return callKaiRunner(env, { ...body, model: KAI_NEXUS_RUNNER_DEFAULT_MODEL });
 }
 
 function continuityResultEventId(result: any): string | null {
@@ -2849,13 +2834,14 @@ export class CompanionBot extends McpAgent<Env> {
 
   private async kaiModelState(): Promise<Record<string, unknown>> {
     const modelOverride = await this.getKaiModelOverride();
-    const defaultModel = this.env.KAI_DEFAULT_MODEL || KAI_NEXUS_RUNNER_DEFAULT_MODEL;
     return {
       companion_id: 'kai',
       model_override: modelOverride,
-      default_model: defaultModel,
-      backup_model: this.env.KAI_BACKUP_MODEL || KAI_NEXUS_RUNNER_FALLBACK_MODELS[0] || null,
-      active_model: modelOverride || defaultModel,
+      model_override_active: false,
+      default_model: KAI_NEXUS_RUNNER_DEFAULT_MODEL,
+      backup_model: null,
+      active_model: KAI_NEXUS_RUNNER_DEFAULT_MODEL,
+      frozen_during_reconciliation: true,
       runner_route: 'nexus',
     };
   }
@@ -2902,6 +2888,7 @@ export class CompanionBot extends McpAgent<Env> {
         recent_context: command.recent_context,
         wake_context: claimData.wake_context,
         dry_run: true,
+        ...kaiRunnerPolicyForCommand(command),
         ...(imageRequestPrompt ? { generate_image: true, generate_image_prompt: imageRequestPrompt } : {}),
         ...(modelOverride ? { model: modelOverride } : {}),
       });
@@ -5115,6 +5102,7 @@ export class CompanionBot extends McpAgent<Env> {
                 model,
                 provider,
                 dry_run: true,
+                ...kaiRunnerPolicyForCommand(command),
               });
 
               const runnerSource = kaiRunnerSource(runnerResult);
