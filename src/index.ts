@@ -781,12 +781,18 @@ async function createAndClaimWakeForCommand(env: Env, command: PendingCommand, r
   return { event_id: eventId, wake_candidate: claim.wake_candidate, wake_context: wakeContext };
 }
 
-async function releaseWakeCandidate(env: Env, candidateId: string, runnerId: string, failureReason?: string): Promise<any> {
+async function releaseWakeCandidate(
+  env: Env,
+  candidateId: string,
+  runnerId: string,
+  failureReason?: string,
+  releaseStatus?: 'released' | 'failed' | 'skipped',
+): Promise<any> {
   return continuityRequest(env, `/wake-candidates/${encodeURIComponent(candidateId)}/release`, {
     method: 'POST',
     body: JSON.stringify({
       runner_id: runnerId,
-      status: failureReason ? 'skipped' : 'released',
+      status: releaseStatus || (failureReason ? 'skipped' : 'released'),
       failure_reason: failureReason || null,
     }),
   });
@@ -3161,15 +3167,25 @@ export class CompanionBot extends McpAgent<Env> {
       }, null, 2), { headers: { 'Content-Type': 'application/json' } });
     } catch (error) {
       const errorText = error instanceof Error ? error.message : String(error);
+      const transient = isTransientKaiRunnerServiceError(500, errorText);
       if (claimData?.wake_candidate?.id) {
-        await releaseWakeCandidate(this.env, claimData.wake_candidate.id, runnerId, errorText).catch(() => null);
+        // Transient model/service errors are retried by the autoresponder queue.
+        // Keep the same durable wake candidate claimable instead of terminally
+        // skipping it, or every scheduled retry fails before reaching Nexus.
+        await releaseWakeCandidate(
+          this.env,
+          claimData.wake_candidate.id,
+          runnerId,
+          errorText,
+          transient ? 'released' : 'skipped',
+        ).catch(() => null);
       }
       await this.recordKaiRunnerStatus(command, {
         ok: false,
         mode: 'runner_exception',
         status: 500,
         error: errorText,
-        transient: isTransientKaiRunnerServiceError(500, errorText),
+        transient,
         runner_origin: origin,
         continuity_event_id: claimData?.event_id || null,
         wake_candidate_id: claimData?.wake_candidate?.id || null,

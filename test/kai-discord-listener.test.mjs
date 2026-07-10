@@ -277,6 +277,10 @@ test('Kai autoresponder retries transient runner failures before dropping requir
   assert.match(source, /'runner_retry'/);
   assert.match(source, /mode: 'runner_retry_scheduled'/);
   assert.match(source, /mode: 'runner_exception'/);
+  assert.match(source, /const transient = isTransientKaiRunnerServiceError\(500, errorText\)/);
+  assert.match(source, /transient \? 'released' : 'skipped'/);
+  assert.match(source, /releaseStatus\?: 'released' \| 'failed' \| 'skipped'/);
+  assert.match(source, /status: releaseStatus \|\| \(failureReason \? 'skipped' : 'released'\)/);
   assert.match(source, /recordKaiRunnerStatus\(command/);
   assert.match(source, /await this\.clearKaiAutoresponderRetryCount\(command\.id\)/);
   assert.match(source, /this\.deleteCommand\(command\.id\)/);
