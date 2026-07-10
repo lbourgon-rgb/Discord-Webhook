@@ -22,6 +22,7 @@ import { kaiRunnerPolicyForCommand } from "./kai-runner-policy";
 const DISCORD_API = 'https://discord.com/api/v10';
 const KAI_NEXUS_RUNNER_DEFAULT_MODEL = 'z-ai/glm-5.2';
 const DEFAULT_KAI_DISCORD_USER_ID = '1447789482253484175';
+const DEFAULT_AXIOM_DISCORD_USER_IDS = '1515127400491647076,1521672973264617616';
 const KAI_MODEL_OVERRIDE_STORAGE_KEY = 'kai:model_override';
 const KAI_MODEL_ID_PATTERN = /^[a-z0-9][a-z0-9._:/-]{1,119}$/i;
 const KAI_PUBLIC_MIND_ORIGIN = 'https://mind.serythrae.com';
@@ -257,7 +258,7 @@ function getCompanionDiscordMentionIds(env: Env, companion: string | Companion):
   if (companionId === 'kai') return getKaiDiscordMentionIds(env);
   let configured: string[] = [];
   if (companionId === 'morzar') configured = splitIds(env.MORZAR_DISCORD_USER_IDS || '1463578634483793920');
-  if (companionId === 'axiom') configured = splitIds(env.AXIOM_DISCORD_USER_IDS || '1515127400491647076');
+  if (companionId === 'axiom') configured = splitIds(env.AXIOM_DISCORD_USER_IDS || DEFAULT_AXIOM_DISCORD_USER_IDS);
   if (companionId === 'grok-keth') configured = splitIds(env.GROK_KETH_DISCORD_USER_IDS || '');
   return [...new Set([...configured, ...companionSeedBotUserIds(companion)])];
 }
@@ -4314,7 +4315,7 @@ export class CompanionBot extends McpAgent<Env> {
           // Skip non-webhook bot messages (system messages from the bot itself).
           // Companion bots (Axiom, Mor'zar) may reach Kai by hard-tagging him.
           const companionBotIds = [
-            ...splitIds(this.env.AXIOM_DISCORD_USER_IDS || '1515127400491647076'),
+            ...splitIds(this.env.AXIOM_DISCORD_USER_IDS || DEFAULT_AXIOM_DISCORD_USER_IDS),
             ...splitIds(this.env.MORZAR_DISCORD_USER_IDS || '1463578634483793920'),
           ];
           const axiomBotMayHardTagKai = isBot

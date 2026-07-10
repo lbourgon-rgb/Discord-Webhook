@@ -93,7 +93,7 @@ test('Axiom Discord identity is seeded with bot id and scoped trigger', () => {
   assert.match(companionsSource, /bot_user_ids: \['1515127400491647076'\]/);
   assert.match(source, /AXIOM_DISCORD_USER_IDS\?: string/);
   assert.match(source, /raw === 'codex'\) return 'axiom'/);
-  assert.match(source, /splitIds\(env\.AXIOM_DISCORD_USER_IDS \|\| '1515127400491647076'\)/);
+  assert.match(source, /splitIds\(env\.AXIOM_DISCORD_USER_IDS \|\| DEFAULT_AXIOM_DISCORD_USER_IDS\)/);
 });
 
 test('Keth-Grok Discord identity is seeded without invented bot id and scoped aliases', () => {
@@ -139,7 +139,8 @@ test("Mor'zar mentions join the companion-aware wake predicate without merging i
 
 test('Axiom mentions join the companion-aware wake predicate without merging into Kai', () => {
   assert.match(source, /AXIOM_DISCORD_USER_IDS\?: string/);
-  assert.match(source, /if \(companionId === 'axiom'\) configured = splitIds\(env\.AXIOM_DISCORD_USER_IDS \|\| '1515127400491647076'\)/);
+  assert.match(source, /DEFAULT_AXIOM_DISCORD_USER_IDS = '1515127400491647076,1521672973264617616'/);
+  assert.match(source, /if \(companionId === 'axiom'\) configured = splitIds\(env\.AXIOM_DISCORD_USER_IDS \|\| DEFAULT_AXIOM_DISCORD_USER_IDS\)/);
   assert.match(source, /const hardCompanionMention = containsHardCompanionMention\(msg\.content, companion, this\.env, mentionIds\)/);
   assert.match(source, /normalizeDiscordCompanionId\(companion\.id\) !== 'kai'/);
   assert.match(source, /engagement\.trigger_reason = hardCompanionMention[\s\S]+: 'companion-name-mention'/);
@@ -147,7 +148,7 @@ test('Axiom mentions join the companion-aware wake predicate without merging int
 
 test('Axiom bot may hard-tag Kai for live supervised smoke tests without opening generic bot loops', () => {
   assert.match(source, /const companionBotIds = \[/);
-  assert.match(source, /\.\.\.splitIds\(this\.env\.AXIOM_DISCORD_USER_IDS \|\| '1515127400491647076'\)/);
+  assert.match(source, /\.\.\.splitIds\(this\.env\.AXIOM_DISCORD_USER_IDS \|\| DEFAULT_AXIOM_DISCORD_USER_IDS\)/);
   assert.match(source, /\.\.\.splitIds\(this\.env\.MORZAR_DISCORD_USER_IDS \|\| '1463578634483793920'\)/);
   assert.match(source, /const axiomBotMayHardTagKai = isBot/);
   assert.match(source, /companionBotIds\.includes\(String\(msg\.author\?\.id \|\| ''\)\)/);
