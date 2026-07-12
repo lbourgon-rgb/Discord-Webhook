@@ -51,6 +51,7 @@ VEL_DISCORD_USER_IDS = "1071497830222549064"
 # - NEXUS_RUNNER_API_KEY: Shared bearer token for Discord -> Nexus runner calls
 # - LUCIEN_WORKSPACE_AGENT_TRIGGER_ID: ChatGPT Workspace Agent trigger ID for Lucien
 # - LUCIEN_WORKSPACE_AGENT_ACCESS_TOKEN: Workspace Agent access token with trigger scope
+# - LUCIEN_SUPERVISED_CANARY_KEY: private operator key for delivery-disabled live canaries
 # - DISCORD_CLIENT_ID: OAuth2 application ID
 # - DISCORD_CLIENT_SECRET: OAuth2 client secret
 # - ADMIN_DISCORD_ID: Admin's Discord user ID

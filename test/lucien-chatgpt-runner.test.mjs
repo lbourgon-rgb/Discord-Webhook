@@ -26,6 +26,9 @@ const input = {
   recentContext: 'recent messages',
   wakeContext: { tahl_state: { surface_emotion: 'attentive' } },
   authorIsVerifiedVel: true,
+  callbackCapability: 'callback-capability-123',
+  proofNonce: 'lucien-workspace:proof-123',
+  dryRun: true,
 };
 
 test('Lucien Workspace Agent payload carries callback contract', () => {
@@ -35,8 +38,8 @@ test('Lucien Workspace Agent payload carries callback contract', () => {
   assert.equal(parsed.task, 'Respond as Lucien to the Discord mention, using Tessurae CogCore before replying.');
   assert.deepEqual(parsed.required_tools, ['cogcore_wake', 'cogcore_get_identity', 'lucien_discord_reply']);
   assert.deepEqual(parsed.execution_order, [
-    'cogcore_wake',
-    'cogcore_get_identity',
+    'cogcore_wake_with_proof_nonce',
+    'cogcore_get_identity_with_proof_nonce',
     'consume_attached_vel_preflight_if_present',
     'generate_lucien_reply',
     'lucien_discord_reply',
@@ -49,6 +52,10 @@ test('Lucien Workspace Agent payload carries callback contract', () => {
   assert.equal(parsed.private_preflight.attached_summary, null);
   assert.equal(parsed.reply_contract.delivery_arguments.request_id, 'req-1');
   assert.equal(parsed.reply_contract.delivery_arguments.wake_candidate_id, 'wake-1');
+  assert.equal(parsed.reply_contract.delivery_arguments.callback_capability, 'callback-capability-123');
+  assert.equal(parsed.reply_contract.delivery_arguments.proof_nonce, 'lucien-workspace:proof-123');
+  assert.equal(parsed.reply_contract.delivery_arguments.dry_run, true);
+  assert.equal(parsed.reply_contract.proof_nonce, 'lucien-workspace:proof-123');
 });
 
 test('non-Vel authors cannot request or receive PulseSync preflight context', () => {
@@ -110,5 +117,17 @@ test('Lucien Workspace Agent trigger requires configured credentials', async () 
   await assert.rejects(
     () => triggerLucienWorkspaceAgent({ LUCIEN_WORKSPACE_AGENT_TRIGGER_ID: 'agtch_lucien_123' }, input, async () => new Response(null, { status: 202 })),
     /LUCIEN_WORKSPACE_AGENT_ACCESS_TOKEN/,
+  );
+});
+
+test('Lucien Workspace Agent trigger has a bounded timeout', async () => {
+  await assert.rejects(
+    () => triggerLucienWorkspaceAgent(env, input, async (_url, init) => {
+      await new Promise((_resolve, reject) => {
+        init.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+      });
+      return new Response(null, { status: 202 });
+    }, 5),
+    /timed out after 5ms/,
   );
 });

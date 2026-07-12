@@ -17,6 +17,17 @@ import { z } from "zod";
 import { Companion, SEED_COMPANIONS } from "./companions";
 import { renderDashboard, renderRegisterPage } from "./dashboard";
 import { lucienReplyGate, triggerLucienWorkspaceAgent } from "./lucien-chatgpt-runner";
+import {
+  isLucienSupervisedCanarySource,
+  lucienResponsePreview,
+  sanitizeLucienWorkspaceRunReceipt,
+  secretMatches,
+  secretMatchesHash,
+  sha256Hex,
+  validateLucienCogCoreProof,
+  type LucienCogCoreProof,
+  type LucienWorkspaceRunReceipt,
+} from "./lucien-workspace-proof";
 import { kaiRunnerPolicyForCommand } from "./kai-runner-policy";
 
 const DISCORD_API = 'https://discord.com/api/v10';
@@ -62,6 +73,7 @@ interface Env {
   LUCIEN_CHATGPT_DELIVERY_ENABLED?: string;
   LUCIEN_WORKSPACE_AGENT_TRIGGER_ID?: string;
   LUCIEN_WORKSPACE_AGENT_ACCESS_TOKEN?: string;
+  LUCIEN_SUPERVISED_CANARY_KEY?: string;
   DASHBOARD_TOKEN?: string;
   DISCORD_CLIENT_ID?: string;
   DISCORD_CLIENT_SECRET?: string;
@@ -776,10 +788,21 @@ async function createAndClaimWakeForCommand(env: Env, command: PendingCommand, r
   if (!claim?.claimed || !claim?.wake_candidate?.id) {
     throw new Error(`No wake candidate could be claimed for event ${eventId}`);
   }
-  const wakeContext = await continuityRequest(env, `/wake-candidates/${encodeURIComponent(String(claim.wake_candidate.id))}/context`, {
-    method: 'GET',
-  });
-  return { event_id: eventId, wake_candidate: claim.wake_candidate, wake_context: wakeContext };
+  try {
+    const wakeContext = await continuityRequest(env, `/wake-candidates/${encodeURIComponent(String(claim.wake_candidate.id))}/context`, {
+      method: 'GET',
+    });
+    return { event_id: eventId, wake_candidate: claim.wake_candidate, wake_context: wakeContext };
+  } catch (error) {
+    await releaseWakeCandidate(
+      env,
+      String(claim.wake_candidate.id),
+      runnerId,
+      `wake context failed: ${error instanceof Error ? error.message : String(error)}`,
+      'released',
+    ).catch(() => null);
+    throw error;
+  }
 }
 
 async function releaseWakeCandidate(
@@ -813,7 +836,7 @@ interface PendingCommand {
   disposition?: KairosDisposition;
   trigger_reason?: string;
   priority?: KairosPriority;
-  source?: 'poll' | 'webhook' | 'manual';
+  source?: 'poll' | 'webhook' | 'manual' | 'workspace-agent-supervised-canary';
   message_id?: string;
   mention_ids?: string[];
   referenced_author_id?: string;
@@ -1307,6 +1330,22 @@ export class CompanionBot extends McpAgent<Env> {
       attachments_json TEXT,
       engagement TEXT,
       timestamp INTEGER NOT NULL
+    )`);
+    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS lucien_workspace_runs (
+      request_id TEXT PRIMARY KEY,
+      event_id TEXT NOT NULL,
+      wake_candidate_id TEXT NOT NULL,
+      callback_capability_hash TEXT NOT NULL,
+      proof_nonce TEXT NOT NULL,
+      status TEXT NOT NULL,
+      mode TEXT,
+      response_preview TEXT,
+      response_sha256 TEXT,
+      wake_receipt_id TEXT,
+      identity_receipt_id TEXT,
+      error TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
     )`);
     this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS channel_cursors (
       channel_id TEXT PRIMARY KEY,
@@ -2565,6 +2604,22 @@ export class CompanionBot extends McpAgent<Env> {
       };
       const ttl = isRequiredVelHardTag(cmd) ? REQUIRED_PENDING_TTL_MS : PENDING_TTL_MS;
       if (now - cmd.timestamp > ttl) {
+        const activeLucienRun = this.ctx.storage.sql.exec(
+          `SELECT request_id, status FROM lucien_workspace_runs
+           WHERE request_id = ? AND status IN ('claiming', 'queued') LIMIT 1`,
+          cmd.id,
+        ).toArray();
+        if (activeLucienRun.length > 0) {
+          // Supervised canary leases are bounded to five minutes. By the time
+          // the ordinary ten-minute pending TTL expires, Continuity can no
+          // longer have a live claim. Retain a terminal receipt instead of
+          // preserving an apparently active run forever.
+          this.updateLucienWorkspaceRun(cmd.id, {
+            status: 'timed_out',
+            mode: 'lease_expired',
+            error: 'Workspace Agent callback did not complete before the bounded lease and pending TTL expired',
+          });
+        }
         const reason = isRequiredVelHardTag(cmd)
           ? `Expired after ${Math.round(REQUIRED_PENDING_TTL_MS / 60000)} minutes despite required Vel hard-tag priority. This indicates the responder did not service the inbox in time.`
           : `Expired after ${Math.round(PENDING_TTL_MS / 60000)} minutes before a responder handled it.`;
@@ -2665,6 +2720,90 @@ export class CompanionBot extends McpAgent<Env> {
   private deleteCommand(id: string) {
     this.ensureTable();
     this.ctx.storage.sql.exec(`DELETE FROM pending_commands WHERE id = ?`, id);
+  }
+
+  private storeLucienWorkspaceRun(input: {
+    requestId: string;
+    eventId: string;
+    wakeCandidateId: string;
+    callbackCapabilityHash: string;
+    proofNonce: string;
+    status: string;
+  }) {
+    this.ensureTable();
+    const now = Date.now();
+    this.ctx.storage.sql.exec(
+      `INSERT INTO lucien_workspace_runs (
+        request_id, event_id, wake_candidate_id, callback_capability_hash,
+        proof_nonce, status, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(request_id) DO UPDATE SET
+        event_id = excluded.event_id,
+        wake_candidate_id = excluded.wake_candidate_id,
+        callback_capability_hash = excluded.callback_capability_hash,
+        proof_nonce = excluded.proof_nonce,
+        status = excluded.status,
+        mode = NULL,
+        response_preview = NULL,
+        response_sha256 = NULL,
+        wake_receipt_id = NULL,
+        identity_receipt_id = NULL,
+        error = NULL,
+        updated_at = excluded.updated_at`,
+      input.requestId,
+      input.eventId,
+      input.wakeCandidateId,
+      input.callbackCapabilityHash,
+      input.proofNonce,
+      input.status,
+      now,
+      now,
+    );
+  }
+
+  private getLucienWorkspaceRun(requestId: string): (LucienWorkspaceRunReceipt & { callback_capability_hash: string }) | null {
+    this.ensureTable();
+    const rows = this.ctx.storage.sql.exec(
+      `SELECT * FROM lucien_workspace_runs WHERE request_id = ? LIMIT 1`,
+      requestId,
+    ).toArray();
+    return rows.length ? rows[0] as any : null;
+  }
+
+  private updateLucienWorkspaceRun(requestId: string, input: {
+    status: string;
+    mode?: string | null;
+    responsePreview?: string | null;
+    responseSha256?: string | null;
+    wakeReceiptId?: string | null;
+    identityReceiptId?: string | null;
+    error?: string | null;
+  }) {
+    this.ensureTable();
+    this.ctx.storage.sql.exec(
+      `UPDATE lucien_workspace_runs SET
+        status = ?, mode = ?, response_preview = ?, response_sha256 = ?,
+        wake_receipt_id = ?, identity_receipt_id = ?, error = ?, updated_at = ?
+       WHERE request_id = ?`,
+      input.status,
+      input.mode ?? null,
+      input.responsePreview ?? null,
+      input.responseSha256 ?? null,
+      input.wakeReceiptId ?? null,
+      input.identityReceiptId ?? null,
+      input.error ?? null,
+      Date.now(),
+      requestId,
+    );
+  }
+
+  private lucienWorkspaceRunReceipt(
+    requestId: string,
+  ): ReturnType<typeof sanitizeLucienWorkspaceRunReceipt> | null {
+    const run = this.getLucienWorkspaceRun(requestId);
+    if (!run) return null;
+    const { callback_capability_hash: _secretHash, ...receipt } = run;
+    return sanitizeLucienWorkspaceRunReceipt(receipt);
   }
 
   private kaiAutoresponderRetryKey(commandId: string): string {
@@ -3198,9 +3337,13 @@ export class CompanionBot extends McpAgent<Env> {
     }
   }
 
-  private async runLucienChatGPTRunnerFromDashboard(requestId: string, origin: 'dashboard' | 'autorespond' | 'mcp' = 'dashboard'): Promise<Response> {
+  private async runLucienChatGPTRunnerFromDashboard(
+    requestId: string,
+    origin: 'dashboard' | 'autorespond' | 'mcp' | 'supervised_canary' = 'dashboard',
+  ): Promise<Response> {
     this.ensureTable();
-    if (this.env.LUCIEN_CHATGPT_RUNNER_ENABLED !== 'true') {
+    const supervisedCanary = origin === 'supervised_canary';
+    if (!supervisedCanary && this.env.LUCIEN_CHATGPT_RUNNER_ENABLED !== 'true') {
       return new Response(JSON.stringify({
         ok: false,
         error: 'Lucien ChatGPT runner is installed but disabled. Set LUCIEN_CHATGPT_RUNNER_ENABLED=true after configuring the Workspace Agent trigger.',
@@ -3222,8 +3365,26 @@ export class CompanionBot extends McpAgent<Env> {
 
     const runnerId = 'chatgpt-workspace-agent:lucien';
     let claimData: { event_id: string; wake_candidate: any; wake_context: any } | null = null;
+    let callbackCapability = '';
+    let proofNonce = '';
     try {
-      claimData = await createAndClaimWakeForCommand(this.env, command, runnerId, 1800);
+      if (supervisedCanary && !isLucienSupervisedCanarySource(command.source)) {
+        throw new Error('Supervised Lucien runner can only execute a synthetic canary request');
+      }
+      if (this.env.LUCIEN_CHATGPT_DELIVERY_ENABLED === 'true' || this.env.LUCIEN_CHATGPT_AUTORESPOND === 'true') {
+        throw new Error('Supervised Lucien proof requires delivery and autorespond to remain disabled');
+      }
+      claimData = await createAndClaimWakeForCommand(this.env, command, runnerId, supervisedCanary ? 300 : 600);
+      callbackCapability = `${crypto.randomUUID()}${crypto.randomUUID()}`;
+      proofNonce = `lucien-workspace:${crypto.randomUUID()}`;
+      this.storeLucienWorkspaceRun({
+        requestId: command.id,
+        eventId: claimData.event_id,
+        wakeCandidateId: String(claimData.wake_candidate.id),
+        callbackCapabilityHash: await sha256Hex(callbackCapability),
+        proofNonce,
+        status: 'claiming',
+      });
       const accepted = await triggerLucienWorkspaceAgent(this.env, {
         requestId: command.id,
         eventId: claimData.event_id,
@@ -3236,7 +3397,11 @@ export class CompanionBot extends McpAgent<Env> {
         recentContext: command.recent_context,
         wakeContext: claimData.wake_context,
         authorIsVerifiedVel: isVelDiscordAuthor(this.env, command.author?.id || command.author_id),
+        callbackCapability,
+        proofNonce,
+        dryRun: supervisedCanary,
       });
+      this.updateLucienWorkspaceRun(command.id, { status: 'queued', mode: 'chatgpt_workspace_agent_queued' });
       this.logActivity(command.companion_id, 'runner_handed_off', command.channel_id, `Lucien ChatGPT Workspace Agent accepted request ${requestId}.`, command.author?.username || 'chatgpt-runner', command.message_id, command.webhook_url, {
         authorId: command.author?.id || command.author_id,
         engagement: command.engagement,
@@ -3251,11 +3416,26 @@ export class CompanionBot extends McpAgent<Env> {
         wake_candidate_id: claimData.wake_candidate.id,
         conversation_key: accepted.conversation_key,
         idempotency_key: accepted.idempotency_key,
+        proof_nonce: proofNonce,
+        discord_delivery_enabled: false,
         runner_origin: origin,
       }, null, 2), { headers: { 'Content-Type': 'application/json' } });
     } catch (error) {
       if (claimData?.wake_candidate?.id) {
-        await releaseWakeCandidate(this.env, claimData.wake_candidate.id, runnerId, error instanceof Error ? error.message : String(error)).catch(() => null);
+        await releaseWakeCandidate(
+          this.env,
+          claimData.wake_candidate.id,
+          runnerId,
+          error instanceof Error ? error.message : String(error),
+          'released',
+        ).catch(() => null);
+      }
+      if (this.getLucienWorkspaceRun(requestId)) {
+        this.updateLucienWorkspaceRun(requestId, {
+          status: 'trigger_failed',
+          mode: 'trigger_failed',
+          error: String(error instanceof Error ? error.message : error).slice(0, 500),
+        });
       }
       return new Response(JSON.stringify({
         ok: false,
@@ -3266,13 +3446,53 @@ export class CompanionBot extends McpAgent<Env> {
 
   private async completeLucienDiscordReply(args: {
     requestId: string;
-    wakeCandidateId?: string;
+    wakeCandidateId: string;
+    callbackCapability: string;
+    proofNonce: string;
+    cogcoreProof: LucienCogCoreProof;
     content: string;
     driftNotes?: string;
     dryRun?: boolean;
-    webhookUrl?: string;
   }): Promise<Record<string, unknown>> {
     this.ensureTable();
+    const run = this.getLucienWorkspaceRun(args.requestId);
+    if (!run) throw new Error(`No supervised Workspace Agent run for request: ${args.requestId}`);
+    if (!await secretMatchesHash(args.callbackCapability, run.callback_capability_hash)) {
+      throw new Error('Invalid Lucien Workspace Agent callback capability');
+    }
+    if (['completed_dry_run', 'completed_delivery_disabled', 'delivered'].includes(run.status)) {
+      return {
+        ok: true,
+        mode: 'idempotent_replay',
+        receipt: this.lucienWorkspaceRunReceipt(args.requestId),
+      };
+    }
+    let cogcoreProof: LucienCogCoreProof;
+    try {
+      if (String(run.wake_candidate_id) !== args.wakeCandidateId) {
+        throw new Error('wake_candidate_id does not belong to this Lucien request');
+      }
+      cogcoreProof = validateLucienCogCoreProof(args.cogcoreProof, run.proof_nonce);
+      if (args.proofNonce !== run.proof_nonce || args.proofNonce !== cogcoreProof.nonce) {
+        throw new Error('proof_nonce does not match the supervised Workspace Agent run');
+      }
+    } catch (error) {
+      await releaseWakeCandidate(
+        this.env,
+        run.wake_candidate_id,
+        'chatgpt-workspace-agent:lucien',
+        `authenticated Workspace Agent proof failed: ${error instanceof Error ? error.message : String(error)}`,
+        'released',
+      ).catch(() => null);
+      this.updateLucienWorkspaceRun(args.requestId, {
+        status: 'proof_failed',
+        mode: 'proof_failed',
+        error: String(error instanceof Error ? error.message : error).slice(0, 500),
+      });
+      const failedCommand = this.getPending().find(cmd => cmd.id === args.requestId);
+      if (failedCommand && isLucienSupervisedCanarySource(failedCommand.source)) this.deleteCommand(args.requestId);
+      throw error;
+    }
     const command = this.getPending().find(cmd => cmd.id === args.requestId);
     if (!command) {
       throw new Error(`No pending command with ID: ${args.requestId}`);
@@ -3283,36 +3503,70 @@ export class CompanionBot extends McpAgent<Env> {
     if (!args.content.trim()) {
       throw new Error('content is required for lucien_discord_reply');
     }
-    if (!args.wakeCandidateId && !args.dryRun) {
-      throw new Error('wake_candidate_id is required so Continuity can complete the Lucien wake candidate');
-    }
-
     const companion = this.getCompanionById(command.companion_id);
     if (!companion) throw new Error(`Unknown companion: ${command.companion_id}`);
 
+    const supervisedCanary = isLucienSupervisedCanarySource(command.source);
     const replyGate = lucienReplyGate(
-      args.dryRun === true,
+      args.dryRun === true || supervisedCanary,
       this.env.LUCIEN_CHATGPT_DELIVERY_ENABLED === 'true',
     );
 
     if (replyGate === 'dry_run_preview') {
+      const responsePreview = lucienResponsePreview(args.content);
+      const responseSha256 = await sha256Hex(args.content);
+      await releaseWakeCandidate(
+        this.env,
+        args.wakeCandidateId,
+        'chatgpt-workspace-agent:lucien',
+        'supervised dry-run completed without Discord delivery',
+        'released',
+      );
+      this.updateLucienWorkspaceRun(args.requestId, {
+        status: 'completed_dry_run',
+        mode: 'dry_run_preview',
+        responsePreview,
+        responseSha256,
+        wakeReceiptId: cogcoreProof.wake_receipt_id,
+        identityReceiptId: cogcoreProof.identity_receipt_id,
+      });
+      if (isLucienSupervisedCanarySource(command.source)) this.deleteCommand(args.requestId);
       return {
         ok: true,
         mode: 'dry_run_preview',
         request_id: args.requestId,
-        wake_candidate_id: args.wakeCandidateId || null,
-        content: args.content,
+        wake_candidate_id: args.wakeCandidateId,
+        discord_posted: false,
+        receipt: this.lucienWorkspaceRunReceipt(args.requestId),
       };
     }
 
     if (replyGate === 'delivery_disabled') {
-      return {
-        ok: false,
+      const responsePreview = lucienResponsePreview(args.content);
+      const responseSha256 = await sha256Hex(args.content);
+      await releaseWakeCandidate(
+        this.env,
+        args.wakeCandidateId,
+        'chatgpt-workspace-agent:lucien',
+        'Workspace Agent response generated while Discord delivery was disabled',
+        'released',
+      );
+      this.updateLucienWorkspaceRun(args.requestId, {
+        status: 'completed_delivery_disabled',
         mode: 'delivery_disabled',
-        error: 'Lucien ChatGPT generated a response, but Discord delivery is disabled. Set LUCIEN_CHATGPT_DELIVERY_ENABLED=true after the supervised connector loop is proven.',
+        responsePreview,
+        responseSha256,
+        wakeReceiptId: cogcoreProof.wake_receipt_id,
+        identityReceiptId: cogcoreProof.identity_receipt_id,
+      });
+      if (isLucienSupervisedCanarySource(command.source)) this.deleteCommand(args.requestId);
+      return {
+        ok: true,
+        mode: 'delivery_disabled',
         request_id: args.requestId,
         wake_candidate_id: args.wakeCandidateId,
-        content: args.content,
+        discord_posted: false,
+        receipt: this.lucienWorkspaceRunReceipt(args.requestId),
       };
     }
 
@@ -3327,7 +3581,7 @@ export class CompanionBot extends McpAgent<Env> {
       if (error instanceof Error && error.message.includes('restricted')) throw error;
     }
 
-    let targetWebhookUrl = args.webhookUrl || command.webhook_url || this.getChannelWebhook(command.channel_id) || this.env.WEBHOOK_URL;
+    let targetWebhookUrl = command.webhook_url || this.getChannelWebhook(command.channel_id) || this.env.WEBHOOK_URL;
     if (!targetWebhookUrl) {
       throw new Error('No webhook URL available for Lucien reply. The pending command must include a webhook URL, or WEBHOOK_URL must be configured.');
     }
@@ -3376,6 +3630,14 @@ export class CompanionBot extends McpAgent<Env> {
     this.logActivity(command.companion_id, 'responded', command.channel_id, args.content, companion.name, sentMessageIds[sentMessageIds.length - 1], targetWebhookUrl);
     this.markResponded(command.channel_id, command.author?.id, command.message_id, 'lucien-chatgpt-workspace-agent');
     this.deleteCommand(args.requestId);
+    this.updateLucienWorkspaceRun(args.requestId, {
+      status: 'delivered',
+      mode: 'delivered',
+      responsePreview: lucienResponsePreview(args.content),
+      responseSha256: await sha256Hex(args.content),
+      wakeReceiptId: cogcoreProof.wake_receipt_id,
+      identityReceiptId: cogcoreProof.identity_receipt_id,
+    });
 
     return {
       ok: true,
@@ -3385,6 +3647,109 @@ export class CompanionBot extends McpAgent<Env> {
       sent_message_ids: sentMessageIds,
       continuity_response_event_id: continuityResponse?.event?.id || null,
     };
+  }
+
+  private lucienWorkspaceStatus(): Response {
+    this.ensureTable();
+    const recentRuns = this.ctx.storage.sql.exec(
+      `SELECT * FROM lucien_workspace_runs ORDER BY updated_at DESC LIMIT 10`,
+    ).toArray().map((row: any) => {
+      const { callback_capability_hash: _secretHash, ...receipt } = row;
+      return sanitizeLucienWorkspaceRunReceipt(receipt);
+    });
+    return new Response(JSON.stringify({
+      ok: true,
+      runner_enabled: this.env.LUCIEN_CHATGPT_RUNNER_ENABLED === 'true',
+      autorespond_enabled: this.env.LUCIEN_CHATGPT_AUTORESPOND === 'true',
+      delivery_enabled: this.env.LUCIEN_CHATGPT_DELIVERY_ENABLED === 'true',
+      trigger_id_configured: Boolean(String(this.env.LUCIEN_WORKSPACE_AGENT_TRIGGER_ID || '').trim()),
+      access_token_configured: Boolean(String(this.env.LUCIEN_WORKSPACE_AGENT_ACCESS_TOKEN || '').trim()),
+      supervised_canary_configured: Boolean(String(this.env.LUCIEN_SUPERVISED_CANARY_KEY || '').trim()),
+      recent_runs: recentRuns,
+    }, null, 2), { headers: { 'Content-Type': 'application/json' } });
+  }
+
+  private async startLucienSupervisedCanary(markerInput: string): Promise<Response> {
+    this.ensureTable();
+    const marker = markerInput.trim().toUpperCase();
+    if (!/^[A-Z0-9_-]{8,80}$/.test(marker)) {
+      return new Response(JSON.stringify({ ok: false, error: 'marker must contain 8-80 letters, digits, underscores, or hyphens' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (this.env.LUCIEN_CHATGPT_DELIVERY_ENABLED === 'true' || this.env.LUCIEN_CHATGPT_AUTORESPOND === 'true') {
+      return new Response(JSON.stringify({ ok: false, error: 'supervised canary requires Discord delivery and autorespond to remain disabled' }), {
+        status: 409,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (!this.env.LUCIEN_WORKSPACE_AGENT_TRIGGER_ID || !this.env.LUCIEN_WORKSPACE_AGENT_ACCESS_TOKEN) {
+      return new Response(JSON.stringify({
+        ok: false,
+        error: 'Workspace Agent trigger ID and access token must be configured before the supervised canary',
+        trigger_id_configured: Boolean(this.env.LUCIEN_WORKSPACE_AGENT_TRIGGER_ID),
+        access_token_configured: Boolean(this.env.LUCIEN_WORKSPACE_AGENT_ACCESS_TOKEN),
+      }), { status: 409, headers: { 'Content-Type': 'application/json' } });
+    }
+
+    const requestId = `lucien-canary:${marker}`;
+    const existingRun = this.lucienWorkspaceRunReceipt(requestId);
+    if (existingRun) {
+      return new Response(JSON.stringify({ ok: true, mode: 'existing_canary', receipt: existingRun }, null, 2), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    const command: PendingCommand = {
+      id: requestId,
+      companion_id: 'lucien',
+      content: `Supervised Workspace Agent canary ${marker}. Use Tessurae CogCore wake and identity, then return a brief private dry-run receipt. Do not post to Discord.`,
+      author: { username: 'supervised-canary', id: 'supervised-canary' },
+      channel_id: 'workspace-agent-supervised-canary',
+      channel_label: 'Workspace Agent supervised canary',
+      disposition: 'respond',
+      trigger_reason: 'supervised-workspace-agent-canary',
+      priority: 'high',
+      source: 'workspace-agent-supervised-canary',
+      message_id: `supervised:${marker}`,
+      response_mode: 'never',
+      timestamp: Date.now(),
+    };
+    if (!this.storeCommand(command)) {
+      return new Response(JSON.stringify({ ok: false, error: 'A command already exists for this supervised canary marker' }), {
+        status: 409,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return this.runLucienChatGPTRunnerFromDashboard(requestId, 'supervised_canary');
+  }
+
+  private async releaseLucienSupervisedCanary(requestId: string): Promise<Response> {
+    const run = this.getLucienWorkspaceRun(requestId);
+    if (!run) {
+      return new Response(JSON.stringify({ ok: false, error: 'supervised canary run not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (['claiming', 'queued'].includes(run.status)) {
+      await releaseWakeCandidate(
+        this.env,
+        run.wake_candidate_id,
+        'chatgpt-workspace-agent:lucien',
+        'supervisor explicitly released incomplete Workspace Agent canary',
+        'released',
+      );
+      this.updateLucienWorkspaceRun(requestId, {
+        status: 'released',
+        mode: 'supervisor_release',
+        error: 'Workspace Agent callback did not complete before explicit cleanup',
+      });
+    }
+    this.deleteCommand(requestId);
+    return new Response(JSON.stringify({ ok: true, receipt: this.lucienWorkspaceRunReceipt(requestId) }, null, 2), {
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 
   // Override fetch to handle trigger and pending endpoints
@@ -3458,6 +3823,30 @@ export class CompanionBot extends McpAgent<Env> {
       return new Response(JSON.stringify({ cleared: true }), {
         headers: { 'Content-Type': 'application/json' },
       });
+    }
+
+    if (url.pathname === '/api/lucien-workspace-agent/status' && request.method === 'GET') {
+      return this.lucienWorkspaceStatus();
+    }
+
+    if (url.pathname === '/api/lucien-workspace-agent/canary' && request.method === 'POST') {
+      const body = await request.json().catch(() => ({})) as { marker?: string };
+      return this.startLucienSupervisedCanary(String(body.marker || ''));
+    }
+
+    const lucienCanaryReceiptMatch = url.pathname.match(/^\/api\/lucien-workspace-agent\/canary\/(.+)$/);
+    if (lucienCanaryReceiptMatch && request.method === 'GET') {
+      const requestId = decodeURIComponent(lucienCanaryReceiptMatch[1]);
+      const receipt = this.lucienWorkspaceRunReceipt(requestId);
+      return new Response(JSON.stringify(receipt ? { ok: true, receipt } : { ok: false, error: 'not found' }, null, 2), {
+        status: receipt ? 200 : 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    const lucienCanaryReleaseMatch = url.pathname.match(/^\/api\/lucien-workspace-agent\/canary\/(.+)\/release$/);
+    if (lucienCanaryReleaseMatch && request.method === 'POST') {
+      return this.releaseLucienSupervisedCanary(decodeURIComponent(lucienCanaryReleaseMatch[1]));
     }
 
     const nexusPreviewMatch = url.pathname.match(/^\/api\/pending\/([^/]+)\/run-with-nexus$/);
@@ -4825,21 +5214,29 @@ export class CompanionBot extends McpAgent<Env> {
       "Complete a Lucien Discord wake after ChatGPT has used Tessurae CogCore. Posts as Lucien, completes the Continuity wake candidate, and clears the pending request.",
       {
         request_id: z.string().describe("Pending Discord request ID."),
-        wake_candidate_id: z.string().optional().describe("Continuity wake candidate ID from the Workspace Agent trigger payload."),
+        wake_candidate_id: z.string().describe("Continuity wake candidate ID from the Workspace Agent trigger payload."),
+        callback_capability: z.string().describe("Request-scoped callback capability from the Workspace Agent trigger payload."),
+        proof_nonce: z.string().describe("Proof nonce supplied to both Tessurae CogCore reads."),
+        cogcore_proof: z.object({
+          nonce: z.string(),
+          wake_receipt_id: z.string(),
+          identity_receipt_id: z.string(),
+        }).describe("Sanitized Tessurae gateway receipts proving wake and identity calls succeeded."),
         content: z.string().describe("Lucien's final Discord reply."),
         drift_notes: z.string().optional().describe("Optional drift check or correction notes from ChatGPT."),
         dry_run: z.boolean().optional().describe("Preview without posting to Discord or completing Continuity."),
-        webhook_url: z.string().optional().describe("Optional Discord webhook URL override."),
       },
-      async ({ request_id, wake_candidate_id, content, drift_notes, dry_run, webhook_url }: any) => {
+      async ({ request_id, wake_candidate_id, callback_capability, proof_nonce, cogcore_proof, content, drift_notes, dry_run }: any) => {
         try {
           const result = await this.completeLucienDiscordReply({
             requestId: request_id,
             wakeCandidateId: wake_candidate_id,
+            callbackCapability: callback_capability,
+            proofNonce: proof_nonce,
+            cogcoreProof: cogcore_proof,
             content,
             driftNotes: drift_notes,
             dryRun: dry_run === true,
-            webhookUrl: webhook_url,
           });
           return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
         } catch (error) {
@@ -6764,6 +7161,32 @@ export default {
       return stub.fetch(new Request(`https://internal${url.pathname}`, { method: 'GET' }));
     }
 
+    if (url.pathname.startsWith('/api/lucien-workspace-agent/')) {
+      const canaryKey = request.headers.get('X-Lucien-Canary-Key') || '';
+      if (!env.LUCIEN_SUPERVISED_CANARY_KEY) {
+        return new Response(JSON.stringify({ error: 'Lucien supervised canary is not configured' }), {
+          status: 503,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders },
+        });
+      }
+      if (!await secretMatches(canaryKey, env.LUCIEN_SUPERVISED_CANARY_KEY)) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders },
+        });
+      }
+      const id = env.COMPANION_BOT.idFromName('default');
+      const stub = env.COMPANION_BOT.get(id);
+      const doRes = await stub.fetch(new Request(`https://internal${url.pathname}${url.search}`, {
+        method: request.method,
+        headers: request.headers,
+        body: request.method !== 'GET' && request.method !== 'HEAD' ? request.body : undefined,
+      }));
+      const res = new Response(doRes.body, doRes);
+      Object.entries(corsHeaders).forEach(([key, value]) => res.headers.set(key, value));
+      return res;
+    }
+
     // API routes — proxy to default DO
     if (url.pathname.startsWith('/api/')) {
       // Auth check for write operations
@@ -6805,6 +7228,14 @@ export default {
             status: 401, headers: { 'Content-Type': 'application/json', ...corsHeaders },
           });
         }
+      }
+
+      const lucienPublicRunRoute = url.pathname.match(/^\/api\/pending\/[^/]+\/run-with-lucien-chatgpt$/);
+      if (lucienPublicRunRoute && request.method === 'POST' && !isAdminAuth) {
+        return new Response(JSON.stringify({ error: 'Forbidden - Lucien Workspace Agent handoff requires admin authorization' }), {
+          status: 403,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders },
+        });
       }
 
       // Ownership check for PUT/DELETE on /api/companions/:id

@@ -13,6 +13,7 @@ The Workspace Agent trigger endpoint and token are account-managed inputs. This 
 
 - `LUCIEN_WORKSPACE_AGENT_TRIGGER_ID`
 - `LUCIEN_WORKSPACE_AGENT_ACCESS_TOKEN`
+- `LUCIEN_SUPERVISED_CANARY_KEY`
 
 ## PulseSync seam
 
@@ -27,14 +28,14 @@ Until the shared contract exists, the descriptor is `pending_shared_contract`, `
 ## Supervised canary sequence
 
 1. Keep `LUCIEN_CHATGPT_DELIVERY_ENABLED=false` and `LUCIEN_CHATGPT_AUTORESPOND=false`.
-2. Set only `LUCIEN_CHATGPT_RUNNER_ENABLED=true` after the trigger ID/token and Lucien's Tessurae MCP tools are configured on the Workspace Agent.
-3. Baseline Lucien's old Continuity wake candidates so no historical item is claimed.
-4. Create one new hard tag in one private channel.
-5. Run `pending_commands` with `action=run_with_lucien_chatgpt` for that new request.
-6. Verify the Workspace Agent called `cogcore_wake` and `cogcore_get_identity`, generated a response, and called `lucien_discord_reply` with `dry_run=true`.
-7. Verify the reply result is `dry_run_preview`, no Discord message was created, and the wake is still available for supervised completion or explicit release.
-8. Repeat once with `dry_run=false` while delivery remains disabled; verify `delivery_disabled` and still no Discord message.
-9. Only after those receipts pass, enable delivery for one private-channel canary. Enable autorespond in a later, separate change.
+2. Keep `LUCIEN_CHATGPT_RUNNER_ENABLED=false`; the supervised canary route is separately authenticated and cannot enable public handoffs.
+3. Configure the trigger ID/token and Lucien's Tessurae MCP tools on the Workspace Agent.
+4. POST a unique marker to `/api/lucien-workspace-agent/canary` with `X-Lucien-Canary-Key`. This creates a synthetic pending request with no Discord channel or webhook.
+5. Verify the real trigger returns `202`, then correlate the proof nonce with successful `cogcore_wake` and `cogcore_get_identity` receipts from Tessurae gateway logs.
+6. Verify `lucien_discord_reply` returns `dry_run_preview` with the same request and wake-candidate IDs, releases the exact Continuity lease, deletes the synthetic pending request, and records a sanitized receipt.
+7. GET the canary receipt and confirm `discord_posted=false`, generated content is inspectable only through the authenticated receipt, and no pending request remains.
+8. If the callback does not arrive, POST the canary release route. It releases the exact claim and closes the synthetic pending request instead of silently orphaning it.
+9. Public runner, delivery, and autorespond remain disabled after this proof. Enabling any of them is a separate change.
 
 ## Rollback
 

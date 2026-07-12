@@ -15,6 +15,9 @@ export interface LucienWorkspaceAgentTriggerInput {
   recentContext?: string;
   wakeContext?: unknown;
   authorIsVerifiedVel: boolean;
+  callbackCapability: string;
+  proofNonce: string;
+  dryRun: boolean;
 }
 
 export type LucienReplyGate = 'dry_run_preview' | 'delivery_disabled' | 'deliver';
@@ -81,8 +84,8 @@ export function buildLucienWorkspaceAgentPayload(input: LucienWorkspaceAgentTrig
       task: 'Respond as Lucien to the Discord mention, using Tessurae CogCore before replying.',
       required_tools: ['cogcore_wake', 'cogcore_get_identity', 'lucien_discord_reply'],
       execution_order: [
-        'cogcore_wake',
-        'cogcore_get_identity',
+        'cogcore_wake_with_proof_nonce',
+        'cogcore_get_identity_with_proof_nonce',
         input.authorIsVerifiedVel ? 'consume_attached_vel_preflight_if_present' : 'skip_vel_preflight',
         'generate_lucien_reply',
         'lucien_discord_reply',
@@ -95,9 +98,14 @@ export function buildLucienWorkspaceAgentPayload(input: LucienWorkspaceAgentTrig
       reply_contract: {
         call_cogcore_first: true,
         final_delivery_tool: 'lucien_discord_reply',
+        proof_nonce: input.proofNonce,
+        required_cogcore_receipts: ['cogcore_wake', 'cogcore_get_identity'],
         delivery_arguments: {
           request_id: input.requestId,
           wake_candidate_id: input.wakeCandidateId,
+          callback_capability: input.callbackCapability,
+          proof_nonce: input.proofNonce,
+          dry_run: input.dryRun,
         },
       },
       discord: {
@@ -121,6 +129,7 @@ export async function triggerLucienWorkspaceAgent(
   env: LucienWorkspaceAgentEnv,
   input: LucienWorkspaceAgentTriggerInput,
   fetcher: FetchLike = fetch,
+  timeoutMs = 15_000,
 ): Promise<LucienWorkspaceAgentAccepted> {
   const triggerId = String(env.LUCIEN_WORKSPACE_AGENT_TRIGGER_ID || '').trim();
   const token = String(env.LUCIEN_WORKSPACE_AGENT_ACCESS_TOKEN || '').trim();
@@ -129,15 +138,28 @@ export async function triggerLucienWorkspaceAgent(
 
   const idempotencyKey = lucienWorkspaceAgentIdempotencyKey(input.requestId);
   const payload = buildLucienWorkspaceAgentPayload(input);
-  const response = await fetcher(`https://api.chatgpt.com/v1/workspace_agents/${encodeURIComponent(triggerId)}/trigger`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json',
-      'Idempotency-Key': idempotencyKey,
-    },
-    body: JSON.stringify(payload),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort('Workspace Agent trigger timeout'), timeoutMs);
+  let response: Response;
+  try {
+    response = await fetcher(`https://api.chatgpt.com/v1/workspace_agents/${encodeURIComponent(triggerId)}/trigger`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': idempotencyKey,
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new LucienWorkspaceAgentTriggerError(`Workspace Agent trigger timed out after ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (response.status !== 202) {
     const body = await response.text().catch(() => '');

@@ -197,11 +197,30 @@ test('Lucien Discord reply tool covers delivery guardrails', () => {
   assert.match(source, /mode: 'dry_run_preview'/);
   assert.match(source, /mode: 'delivery_disabled'/);
   assert.match(source, /lucien_discord_reply can only complete Lucien requests/);
-  assert.match(source, /wake_candidate_id is required/);
+  assert.match(source, /wake_candidate_id does not belong to this Lucien request/);
+  assert.match(source, /Invalid Lucien Workspace Agent callback capability/);
+  assert.match(source, /validateLucienCogCoreProof/);
+  assert.match(source, /authenticated Workspace Agent proof failed/);
+  assert.match(source, /status: 'proof_failed'/);
+  assert.match(source, /supervised dry-run completed without Discord delivery/);
+  assert.match(source, /status: 'completed_delivery_disabled'/);
+  assert.doesNotMatch(source, /args\.webhookUrl \|\| command\.webhook_url/);
   assert.match(source, /Channel is restricted - admin exception required for lucien/);
   assert.match(source, /Webhook failed on Lucien reply chunk/);
   assert.match(source, /this\.deleteCommand\(args\.requestId\)/);
   assert.match(source, /No pending command with ID/);
+});
+
+test('Lucien supervised canary is synthetic, private, and operator-gated', () => {
+  assert.match(source, /LUCIEN_SUPERVISED_CANARY_KEY\?: string/);
+  assert.match(source, /workspace-agent-supervised-canary/);
+  assert.match(source, /X-Lucien-Canary-Key/);
+  assert.match(source, /supervised canary requires Discord delivery and autorespond to remain disabled/);
+  assert.match(source, /Discord delivery and autorespond to remain disabled/i);
+  assert.match(source, /Forbidden - Lucien Workspace Agent handoff requires admin authorization/);
+  assert.match(source, /status IN \('claiming', 'queued'\)/);
+  assert.match(source, /status: 'timed_out'/);
+  assert.match(source, /args\.dryRun === true \|\| supervisedCanary/);
 });
 
 test("Mor'zar queued Discord activity remains companion_id=morzar for Continuity wake creation", () => {
