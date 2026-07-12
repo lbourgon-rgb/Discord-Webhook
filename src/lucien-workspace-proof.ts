@@ -40,7 +40,7 @@ export async function secretMatchesHash(candidate: string, expectedHex: string):
 
 export async function secretMatches(candidate: string, expected: string | undefined): Promise<boolean> {
   if (!candidate || !expected) return false;
-  return secretMatchesHash(candidate, await sha256Hex(expected));
+  return secretMatchesHash(candidate.trim(), await sha256Hex(expected.trim()));
 }
 
 export function validateLucienCogCoreProof(

@@ -18,6 +18,11 @@ test('request-scoped callback capabilities are verified without storing plaintex
   assert.equal(await secretMatches('operator-key', 'different'), false);
 });
 
+test('operator secrets tolerate transport-only surrounding whitespace', async () => {
+  assert.equal(await secretMatches('  canary-key\r\n', 'canary-key\n'), true);
+  assert.equal(await secretMatches('different', 'canary-key'), false);
+});
+
 test('CogCore proof must carry both receipts for the exact nonce', () => {
   const proof = validateLucienCogCoreProof({
     nonce: 'proof-1',
