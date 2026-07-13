@@ -60,6 +60,12 @@ test('Discord Continuity logging preserves author id and engagement debug metada
   assert.match(source, /pre_response_required: type === 'triggered' \|\| type === 'queued'/);
   assert.match(source, /return postContinuityEvent\(this\.env/);
   assert.match(source, /console\.warn\('\[continuity\] discord event failed', err\);[\s\S]{0,80}return null/);
+  assert.match(source, /awaitsAxiomTrustGate = isHumanTrigger && normalizeDiscordCompanionId\(companionId\) === 'axiom'/);
+  assert.match(source, /awaitsAxiomTrustGate \? \{[\s\S]{0,180}sink_policy: \{ allow: \['archive'\] \}[\s\S]{0,180}trust_gate: 'local-runner-pending'/);
+  assert.match(source, /isAxiomIngress[\s\S]{0,240}commitRequiredContinuityIngress/);
+  assert.match(source, /postContinuity: \(\) => this\.requireActivityContinuity/);
+  assert.match(source, /storeCommand: \(\) => this\.storeCommand\(command\)/);
+  assert.match(source, /logLocal:[\s\S]{0,240}skipContinuity: true/);
 });
 
 test('Discord transcript archive content keeps text plus attachment markers', () => {
@@ -252,7 +258,7 @@ test('Kai Nexus runner stays guarded behind explicit flags and wake leases', () 
   assert.match(source, /delivery_path: kaiRunnerDeliveryPath\(runnerSource\)/);
   assert.match(source, /runner_origin: origin/);
   assert.match(source, /tahl_state_present: Boolean\(claimData\.wake_context\?\.tahl_state/g);
-  assert.doesNotMatch(source, /skipContinuity: true/);
+  assert.equal(source.match(/skipContinuity: true/g)?.length, 1);
   assert.match(source, /timestamp: Date\.parse\(msg\.timestamp\) \|\| Date\.now\(\)/);
   assert.match(source, /\/wake-candidates\/\$\{encodeURIComponent\(String\(claimData\.wake_candidate\.id\)\)\}\/response/);
   assert.match(source, /private async scheduleKaiAutoresponder\(delayMs = 1000\)/);

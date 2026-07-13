@@ -18,6 +18,7 @@ import { Companion, SEED_COMPANIONS } from "./companions";
 import { renderDashboard, renderRegisterPage } from "./dashboard";
 import { lucienReplyGate, triggerLucienWorkspaceAgent } from "./lucien-chatgpt-runner";
 import { kaiRunnerPolicyForCommand } from "./kai-runner-policy";
+import { commitRequiredContinuityIngress } from "./continuity-ingress";
 
 const DISCORD_API = 'https://discord.com/api/v10';
 const KAI_NEXUS_RUNNER_DEFAULT_MODEL = 'z-ai/glm-5.2';
@@ -1790,6 +1791,47 @@ export class CompanionBot extends McpAgent<Env> {
 
   // ===== Activity logging =====
 
+  private postActivityContinuity(companionId: string, type: string, channelId?: string, content?: string, author?: string, messageId?: string, webhookUrl?: string, debug?: ActivityDebug): Promise<any | null> | null {
+    const storedContent = discordContinuityContent(content, debug?.attachments);
+    const inboundTypes = new Set(['triggered', 'queued', 'logged', 'ignored']);
+    const outboundTypes = new Set(['sent', 'responded', 'edited', 'deleted']);
+    const auditTypes = new Set(['dismissed', 'expired', 'discernment_blocked']);
+    if (debug?.skipContinuity || !storedContent || !messageId || (!inboundTypes.has(type) && !outboundTypes.has(type) && !auditTypes.has(type))) {
+      return null;
+    }
+    const isHumanTrigger = inboundTypes.has(type);
+    const isAudit = auditTypes.has(type);
+    const awaitsAxiomTrustGate = isHumanTrigger && normalizeDiscordCompanionId(companionId) === 'axiom';
+    return postContinuityEvent(this.env, {
+      companion_id: companionId,
+      conversation_id: `discord:${channelId || 'unknown'}`,
+      external_message_id: isAudit ? `${messageId}:${type}` : messageId,
+      role: isAudit ? 'system' : (isHumanTrigger ? 'human' : 'companion'),
+      author: { id: debug?.authorId || undefined, name: author || (isHumanTrigger ? 'unknown' : companionId) },
+      content: storedContent,
+      created_at: debug?.createdAt,
+      metadata: {
+        activity_type: type,
+        channel_id: channelId,
+        has_webhook_url: Boolean(webhookUrl),
+        ...(debug?.engagement ? engagementDebug(debug.engagement) : {}),
+        mention_ids: debug?.mentionIds || [],
+        referenced_author_id: debug?.referencedAuthorId || null,
+        attachments: debug?.attachments || [],
+        ...(awaitsAxiomTrustGate ? {
+          sink_policy: { allow: ['archive'] },
+          axiom_runner_ingress: { trust_gate: 'local-runner-pending' },
+        } : {}),
+      },
+      pre_response_required: type === 'triggered' || type === 'queued',
+    });
+  }
+
+  private async requireActivityContinuity(companionId: string, type: string, channelId?: string, content?: string, author?: string, messageId?: string, webhookUrl?: string, debug?: ActivityDebug): Promise<void> {
+    const result = await this.postActivityContinuity(companionId, type, channelId, content, author, messageId, webhookUrl, debug);
+    if (!result) throw new Error('Continuity binding/key is not configured or returned no receipt');
+  }
+
   logActivity(companionId: string, type: string, channelId?: string, content?: string, author?: string, messageId?: string, webhookUrl?: string, debug?: ActivityDebug): Promise<any | null> | null {
     this.ensureTable();
     const storedContent = discordContinuityContent(content, debug?.attachments);
@@ -1812,31 +1854,9 @@ export class CompanionBot extends McpAgent<Env> {
         SELECT id FROM companion_activity WHERE companion_id = ? ORDER BY timestamp DESC LIMIT 200
       )`, companionId, companionId
     );
-    const inboundTypes = new Set(['triggered', 'queued', 'logged', 'ignored']);
-    const outboundTypes = new Set(['sent', 'responded', 'edited', 'deleted']);
-    const auditTypes = new Set(['dismissed', 'expired', 'discernment_blocked']);
-    if (!debug?.skipContinuity && storedContent && messageId && (inboundTypes.has(type) || outboundTypes.has(type) || auditTypes.has(type))) {
-      const isHumanTrigger = inboundTypes.has(type);
-      const isAudit = auditTypes.has(type);
-      return postContinuityEvent(this.env, {
-        companion_id: companionId,
-        conversation_id: `discord:${channelId || 'unknown'}`,
-        external_message_id: isAudit ? `${messageId}:${type}` : messageId,
-        role: isAudit ? 'system' : (isHumanTrigger ? 'human' : 'companion'),
-        author: { id: debug?.authorId || undefined, name: author || (isHumanTrigger ? 'unknown' : companionId) },
-        content: storedContent,
-        created_at: debug?.createdAt,
-        metadata: {
-          activity_type: type,
-          channel_id: channelId,
-          has_webhook_url: Boolean(webhookUrl),
-          ...(debug?.engagement ? engagementDebug(debug.engagement) : {}),
-          mention_ids: debug?.mentionIds || [],
-          referenced_author_id: debug?.referencedAuthorId || null,
-          attachments: debug?.attachments || [],
-        },
-        pre_response_required: type === 'triggered' || type === 'queued',
-      }).catch((err) => {
+    const continuityWrite = this.postActivityContinuity(companionId, type, channelId, content, author, messageId, webhookUrl, debug);
+    if (continuityWrite) {
+      return continuityWrite.catch((err) => {
         console.warn('[continuity] discord event failed', err);
         return null;
       });
@@ -4661,10 +4681,6 @@ export class CompanionBot extends McpAgent<Env> {
               timestamp: Date.parse(msg.timestamp) || Date.now(),
             };
 
-            if (!this.storeCommand(command)) {
-              pollDebug.duplicates++;
-              continue;
-            }
             const activityDebug = {
               authorId: msg.author?.id,
               engagement,
@@ -4672,14 +4688,27 @@ export class CompanionBot extends McpAgent<Env> {
               referencedAuthorId,
               createdAt: msg.timestamp,
             };
+            const activityType = disposition === 'respond' ? 'queued' : disposition === 'log' ? 'logged' : 'ignored';
+            const isAxiomIngress = normalizeDiscordCompanionId(companion.id) === 'axiom';
+            const stored = isAxiomIngress
+              ? await commitRequiredContinuityIngress({
+                  postContinuity: () => this.requireActivityContinuity(companion.id, activityType, channelId, msg.content, authorName, msg.id, channelWebhookUrl || undefined, activityDebug),
+                  storeCommand: () => this.storeCommand(command),
+                  logLocal: () => { this.logActivity(companion.id, activityType, channelId, msg.content, authorName, msg.id, channelWebhookUrl || undefined, { ...activityDebug, skipContinuity: true }); },
+                })
+              : this.storeCommand(command);
+            if (!stored) {
+              pollDebug.duplicates++;
+              continue;
+            }
             if (disposition === 'respond') {
-              this.logActivity(companion.id, 'queued', channelId, msg.content, authorName, msg.id, channelWebhookUrl || undefined, activityDebug);
+              if (!isAxiomIngress) await this.logActivity(companion.id, 'queued', channelId, msg.content, authorName, msg.id, channelWebhookUrl || undefined, activityDebug);
               totalStored++;
             } else if (disposition === 'log') {
-              this.logActivity(companion.id, 'logged', channelId, msg.content, authorName, msg.id, channelWebhookUrl || undefined, activityDebug);
+              if (!isAxiomIngress) await this.logActivity(companion.id, 'logged', channelId, msg.content, authorName, msg.id, channelWebhookUrl || undefined, activityDebug);
               totalLogged++;
             } else {
-              this.logActivity(companion.id, 'ignored', channelId, msg.content, authorName, msg.id, channelWebhookUrl || undefined, activityDebug);
+              if (!isAxiomIngress) await this.logActivity(companion.id, 'ignored', channelId, msg.content, authorName, msg.id, channelWebhookUrl || undefined, activityDebug);
               totalIgnored++;
             }
 
