@@ -153,15 +153,15 @@ test('Axiom mentions join the companion-aware wake predicate without merging int
 });
 
 test('Axiom bot may hard-tag Kai for live supervised smoke tests without opening generic bot loops', () => {
-  assert.match(source, /const companionBotIds = \[/);
-  assert.match(source, /\.\.\.splitIds\(this\.env\.AXIOM_DISCORD_USER_IDS \|\| DEFAULT_AXIOM_DISCORD_USER_IDS\)/);
-  assert.match(source, /\.\.\.splitIds\(this\.env\.MORZAR_DISCORD_USER_IDS \|\| '1463578634483793920'\)/);
-  assert.match(source, /const axiomBotMayHardTagKai = isBot/);
-  assert.match(source, /companionBotIds\.includes\(String\(msg\.author\?\.id \|\| ''\)\)/);
-  assert.match(source, /containsHardKaiMention\(String\(msg\.content \|\| ''\), this\.env, normalizeMentionIds\(msg\.mentions\)\)/);
-  assert.match(source, /if \(isBot && !isWebhook && !axiomBotMayHardTagKai\) continue/);
-  assert.match(source, /const hardChannel = isKaiSocialHardTagChannel\(this\.env, channelId\) \|\| axiomBotMayHardTagKai/);
+  assert.match(source, /selectAxiomScopedPeerTargets/);
+  assert.match(source, /const peerAuthorCompanion = isBot && !isWebhook/);
+  assert.match(source, /const trustedPeerMayHardTagKai = Boolean\(/);
+  assert.match(source, /isLegacyKaiPeerHardTagActor\(normalizeDiscordCompanionId\(peerAuthorCompanion\.id\)\)/);
+  assert.match(source, /peerTargetModes\.get\('kai'\) === 'hard_mention'/);
+  assert.match(source, /peerTargetModes\.has\('kai'\)[\s\S]{0,80}&& !peerTargetModes\.has\('axiom'\)/);
+  assert.match(source, /const hardChannel = isKaiSocialHardTagChannel\(this\.env, channelId\) \|\| trustedPeerMayHardTagKai/);
   assert.match(source, /const hardAllowed = hardKaiMention && hardChannel/);
+  assert.match(source, /normalizeDiscordCompanionId\(companion\.id\) === 'axiom'[\s\S]{0,100}peerTargetModes\.has\('axiom'\)/);
 });
 
 test('Kai social hard-tag bootstrap upgrades existing watch-channel monitor rows', () => {

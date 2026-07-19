@@ -19,6 +19,15 @@ import { renderDashboard, renderRegisterPage } from "./dashboard";
 import { lucienReplyGate, triggerLucienWorkspaceAgent } from "./lucien-chatgpt-runner";
 import { kaiRunnerPolicyForCommand } from "./kai-runner-policy";
 import { commitRequiredContinuityIngress } from "./continuity-ingress";
+import {
+  decideTrustedPeerIngress,
+  identifyTrustedPeerCompanion,
+  isLegacyKaiPeerHardTagActor,
+  selectAxiomScopedPeerTargets,
+  type TrustedPeerIngressReasonCode,
+  type TrustedPeerTargetMode,
+  type TrustedPeerWakeMetadata,
+} from "./companion-peer-ingress";
 
 const DISCORD_API = 'https://discord.com/api/v10';
 const KAI_NEXUS_RUNNER_DEFAULT_MODEL = 'z-ai/glm-5.2';
@@ -120,6 +129,8 @@ interface ActivityDebug {
   attachments?: Array<Record<string, unknown>>;
   createdAt?: string;
   skipContinuity?: boolean;
+  continuityRole?: 'human' | 'companion';
+  peerWake?: TrustedPeerWakeMetadata;
 }
 
 interface ActiveConversation {
@@ -292,6 +303,35 @@ function containsHardKaiMention(content: string, env: Env, mentionIds: string[] 
 function containsHardCompanionMention(content: string, companion: string | Companion, env: Env, mentionIds: string[] = []): boolean {
   const companionIds = getCompanionDiscordMentionIds(env, companion);
   return companionIds.some(id => new RegExp(`<@!?${id}>`).test(content) || mentionIds.includes(id));
+}
+
+function companionForDiscordBotAuthor(env: Env, companions: Companion[], authorId?: string): Companion | null {
+  const companionId = identifyTrustedPeerCompanion(authorId, companions.map(companion => ({
+    companion_id: normalizeDiscordCompanionId(companion.id),
+    discord_user_ids: getCompanionDiscordMentionIds(env, companion),
+  })));
+  return companionId
+    ? companions.find(companion => normalizeDiscordCompanionId(companion.id) === companionId) || null
+    : null;
+}
+
+function discordReplyDepth(message: any): number {
+  let depth = 0;
+  let current = message;
+  while (current?.message_reference?.message_id) {
+    depth++;
+    if (depth > 2) return depth;
+    current = current.referenced_message;
+    if (!current) break;
+  }
+  return depth;
+}
+
+function recordPeerIngressReason(
+  reasons: Record<string, number>,
+  reasonCode: TrustedPeerIngressReasonCode,
+): void {
+  reasons[reasonCode] = (reasons[reasonCode] || 0) + 1;
 }
 
 function containsSoftKaiName(content: string): boolean {
@@ -1806,7 +1846,7 @@ export class CompanionBot extends McpAgent<Env> {
       companion_id: companionId,
       conversation_id: `discord:${channelId || 'unknown'}`,
       external_message_id: isAudit ? `${messageId}:${type}` : messageId,
-      role: isAudit ? 'system' : (isHumanTrigger ? 'human' : 'companion'),
+      role: isAudit ? 'system' : (isHumanTrigger ? (debug?.continuityRole || 'human') : 'companion'),
       author: { id: debug?.authorId || undefined, name: author || (isHumanTrigger ? 'unknown' : companionId) },
       content: storedContent,
       created_at: debug?.createdAt,
@@ -1818,6 +1858,7 @@ export class CompanionBot extends McpAgent<Env> {
         mention_ids: debug?.mentionIds || [],
         referenced_author_id: debug?.referencedAuthorId || null,
         attachments: debug?.attachments || [],
+        ...(debug?.peerWake ? { peer_wake: debug.peerWake } : {}),
         ...(awaitsAxiomTrustGate ? {
           sink_policy: { allow: ['archive'] },
           axiom_runner_ingress: { trust_gate: 'local-runner-pending' },
@@ -4257,6 +4298,7 @@ export class CompanionBot extends McpAgent<Env> {
       queued: 0,
       logged: 0,
       ignored: 0,
+      peer_reasons: {} as Record<string, number>,
     };
 
     if (monitors.length === 0) {
@@ -4331,27 +4373,60 @@ export class CompanionBot extends McpAgent<Env> {
         for (const msg of messages) {
           const isWebhook = !!msg.webhook_id;
           const isBot = !!msg.author?.bot;
-
-          // Skip non-webhook bot messages (system messages from the bot itself).
-          // Companion bots (Axiom, Mor'zar) may reach Kai by hard-tagging him.
-          const companionBotIds = [
-            ...splitIds(this.env.AXIOM_DISCORD_USER_IDS || DEFAULT_AXIOM_DISCORD_USER_IDS),
-            ...splitIds(this.env.MORZAR_DISCORD_USER_IDS || '1463578634483793920'),
-          ];
-          const axiomBotMayHardTagKai = isBot
-            && !isWebhook
-            && companionBotIds.includes(String(msg.author?.id || ''))
-            && containsHardKaiMention(String(msg.content || ''), this.env, normalizeMentionIds(msg.mentions));
-          if (isBot && !isWebhook && !axiomBotMayHardTagKai) continue;
+          const companionsForMessage = this.getAllCompanions();
+          const peerAuthorCompanion = isBot && !isWebhook
+            ? companionForDiscordBotAuthor(this.env, companionsForMessage, msg.author?.id)
+            : null;
+          if (isBot && !isWebhook && !peerAuthorCompanion) {
+            recordPeerIngressReason(pollDebug.peer_reasons, 'untrusted-automated-author');
+            continue;
+          }
           // Skip events with neither text nor attachment metadata.
           if (!messageHasUsableContent(msg)) continue;
           msg.content = String(msg.content || '');
 
-          if (!isWebhook && isKaiListenerEnabled(this.env) && isKaiSocialAutorespondEnabled(this.env)) {
+          const peerTargetModes = new Map<string, TrustedPeerTargetMode>();
+          if (peerAuthorCompanion) {
+            const referencedAuthorId = String(msg.referenced_message?.author?.id || msg.message_reference?.author_id || '').trim();
+            const axiomCompanion = companionsForMessage.find(candidate => normalizeDiscordCompanionId(candidate.id) === 'axiom');
+            const kaiCompanion = companionsForMessage.find(candidate => normalizeDiscordCompanionId(candidate.id) === 'kai');
+            for (const target of selectAxiomScopedPeerTargets({
+              content: msg.content,
+              referenced_author_id: referencedAuthorId,
+              axiom_discord_user_ids: axiomCompanion ? getCompanionDiscordMentionIds(this.env, axiomCompanion) : [],
+              kai_discord_user_ids: kaiCompanion ? getCompanionDiscordMentionIds(this.env, kaiCompanion) : [],
+            })) {
+              peerTargetModes.set(target.companion_id, target.target_mode);
+            }
+            if (peerTargetModes.size === 0) {
+              recordPeerIngressReason(pollDebug.peer_reasons, 'trusted-peer-no-target');
+              continue;
+            }
+          }
+
+          const trustedPeerMayHardTagKai = Boolean(
+            peerAuthorCompanion
+            && isLegacyKaiPeerHardTagActor(normalizeDiscordCompanionId(peerAuthorCompanion.id))
+            && peerTargetModes.get('kai') === 'hard_mention'
+          );
+
+          if (
+            !isWebhook
+            && isKaiListenerEnabled(this.env)
+            && isKaiSocialAutorespondEnabled(this.env)
+            && (
+              !peerAuthorCompanion
+              || (
+                trustedPeerMayHardTagKai
+                && peerTargetModes.has('kai')
+                && !peerTargetModes.has('axiom')
+              )
+            )
+          ) {
             const mentionIds = normalizeMentionIds(msg.mentions);
             const hardKaiMention = containsHardKaiMention(msg.content, this.env, mentionIds);
             const softKaiMention = containsSoftKaiName(msg.content);
-            const hardChannel = isKaiSocialHardTagChannel(this.env, channelId) || axiomBotMayHardTagKai;
+            const hardChannel = isKaiSocialHardTagChannel(this.env, channelId) || trustedPeerMayHardTagKai;
             const softChannel = isKaiSocialSoftTagChannel(this.env, channelId);
             const discernChannel = isKaiSocialDiscernChannel(this.env, channelId);
             const otherUserTag = mentionsNonKaiUser(msg.content, this.env, mentionIds);
@@ -4486,20 +4561,29 @@ export class CompanionBot extends McpAgent<Env> {
               const sender = allCompanions.find((c: any) => c.name === senderName);
               if (sender) senderCompanionId = sender.id;
             }
+          } else if (peerAuthorCompanion) {
+            senderCompanionId = normalizeDiscordCompanionId(peerAuthorCompanion.id);
           }
 
           const triggerResult = this.findTriggeredCompanionDynamic(msg.content);
           const messageMentionIds = normalizeMentionIds(msg.mentions);
           const mentionResult = this.findMentionedCompanionDynamic(msg.content, messageMentionIds);
-          let triggered = [...triggerResult.matched];
-          for (const companion of mentionResult.matched) {
-            if (!triggered.some(existing => existing.id === companion.id)) triggered.push(companion);
+          let triggered = peerAuthorCompanion
+            ? companionsForMessage.filter(companion =>
+                normalizeDiscordCompanionId(companion.id) === 'axiom'
+                && peerTargetModes.has('axiom')
+              )
+            : [...triggerResult.matched];
+          if (!peerAuthorCompanion) {
+            for (const companion of mentionResult.matched) {
+              if (!triggered.some(existing => existing.id === companion.id)) triggered.push(companion);
+            }
           }
 
-          if (triggerResult.debug.length > 0) {
+          if (!peerAuthorCompanion && triggerResult.debug.length > 0) {
             console.log(`Cron: trigger debug — msg=${msg.id} content="${msg.content.substring(0, 80)}" matches=[${triggerResult.debug.join(',')}]`);
           }
-          if (mentionResult.debug.length > 0) {
+          if (!peerAuthorCompanion && mentionResult.debug.length > 0) {
             console.log(`Cron: mention debug — msg=${msg.id} matches=[${mentionResult.debug.join(',')}]`);
           }
           let repliedCompanionId: string | null = null;
@@ -4539,7 +4623,10 @@ export class CompanionBot extends McpAgent<Env> {
 
           // Self-trigger prevention: companion can't trigger itself
           if (senderCompanionId) {
-            triggered = triggered.filter(c => c.id !== senderCompanionId);
+            if (peerAuthorCompanion && triggered.some(c => normalizeDiscordCompanionId(c.id) === senderCompanionId)) {
+              recordPeerIngressReason(pollDebug.peer_reasons, 'trusted-peer-self-target');
+            }
+            triggered = triggered.filter(c => normalizeDiscordCompanionId(c.id) !== senderCompanionId);
           }
 
           // Loop prevention: for webhook/bot messages, skip companions that already have pending commands
@@ -4573,6 +4660,7 @@ export class CompanionBot extends McpAgent<Env> {
             // Check admin-restricted channels (highest priority)
             if (guildIdForEntity && this.isChannelRestricted(channelId, guildIdForEntity)) {
               if (!this.hasChannelException(companion.id, channelId, guildIdForEntity)) {
+                if (peerAuthorCompanion) recordPeerIngressReason(pollDebug.peer_reasons, 'trusted-peer-channel-blocked');
                 console.log(`Cron: ${companion.name} blocked — channel ${channelId} is restricted`);
                 continue;
               }
@@ -4580,6 +4668,7 @@ export class CompanionBot extends McpAgent<Env> {
 
             // Check channel permissions (legacy blocklist)
             if (this.isChannelBlocked(companion.id, channelId)) {
+              if (peerAuthorCompanion) recordPeerIngressReason(pollDebug.peer_reasons, 'trusted-peer-channel-blocked');
               console.log(`Cron: ${companion.name} blocked in channel ${channelId}, skipping`);
               continue;
             }
@@ -4590,16 +4679,19 @@ export class CompanionBot extends McpAgent<Env> {
               if (entityConfig) {
                 // Check active status
                 if (!entityConfig.active) {
+                  if (peerAuthorCompanion) recordPeerIngressReason(pollDebug.peer_reasons, 'trusted-peer-channel-blocked');
                   console.log(`Cron: ${companion.name} deactivated in guild ${guildIdForEntity}, skipping`);
                   continue;
                 }
                 // Check watch_channels scope
                 if (entityConfig.watch_channels && !entityConfig.watch_channels.includes(channelId)) {
+                  if (peerAuthorCompanion) recordPeerIngressReason(pollDebug.peer_reasons, 'trusted-peer-channel-blocked');
                   console.log(`Cron: ${companion.name} not watching channel ${channelId}, skipping`);
                   continue;
                 }
                 // Check blocked channels
                 if (entityConfig.blocked_channels && entityConfig.blocked_channels.includes(channelId)) {
+                  if (peerAuthorCompanion) recordPeerIngressReason(pollDebug.peer_reasons, 'trusted-peer-channel-blocked');
                   console.log(`Cron: ${companion.name} entity-blocked in channel ${channelId}, skipping`);
                   continue;
                 }
@@ -4681,12 +4773,40 @@ export class CompanionBot extends McpAgent<Env> {
               timestamp: Date.parse(msg.timestamp) || Date.now(),
             };
 
+            let peerWake: TrustedPeerWakeMetadata | undefined;
+            if (peerAuthorCompanion) {
+              const targetCompanionId = normalizeDiscordCompanionId(companion.id);
+              const targetMode = peerTargetModes.get(targetCompanionId);
+              if (!targetMode) {
+                recordPeerIngressReason(pollDebug.peer_reasons, 'trusted-peer-no-target');
+                continue;
+              }
+              const sourceAlreadyProcessed = this.hasProcessedCommandForMessage(command);
+              const replyDepth = targetMode === 'direct_reply' ? 1 : 0;
+              const loopDepth = targetMode === 'direct_reply'
+                ? Math.max(0, discordReplyDepth(msg) - 1)
+                : 0;
+              const peerDecision = decideTrustedPeerIngress({
+                actor_companion_id: normalizeDiscordCompanionId(peerAuthorCompanion.id),
+                target_companion_id: targetCompanionId,
+                target_mode: targetMode,
+                channel_allowed: monitor.respond_enabled && monitor.response_mode !== 'never',
+                source_already_processed: sourceAlreadyProcessed,
+                reply_depth: replyDepth,
+                loop_depth: loopDepth,
+              });
+              recordPeerIngressReason(pollDebug.peer_reasons, peerDecision.reason_code);
+              if (!peerDecision.admitted || !peerDecision.peer_wake) continue;
+              peerWake = peerDecision.peer_wake;
+            }
+
             const activityDebug = {
               authorId: msg.author?.id,
               engagement,
               mentionIds,
               referencedAuthorId,
               createdAt: msg.timestamp,
+              ...(peerWake ? { continuityRole: 'companion' as const, peerWake } : {}),
             };
             const activityType = disposition === 'respond' ? 'queued' : disposition === 'log' ? 'logged' : 'ignored';
             const isAxiomIngress = normalizeDiscordCompanionId(companion.id) === 'axiom';
@@ -4731,7 +4851,11 @@ export class CompanionBot extends McpAgent<Env> {
               }
             }
 
-            console.log(`Cron: ${companion.name} ${disposition} (${triggerReason}) by "${msg.content}" from ${authorName}`);
+            if (peerWake) {
+              console.log(`Cron: trusted peer ingress msg=${msg.id} target=${peerWake.target_companion_id} reason=${peerWake.reason_code}`);
+            } else {
+              console.log(`Cron: ${companion.name} ${disposition} (${triggerReason}) by "${msg.content}" from ${authorName}`);
+            }
           }
         }
       } catch (err: any) {
