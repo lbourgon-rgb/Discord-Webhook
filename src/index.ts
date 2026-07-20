@@ -55,6 +55,8 @@ interface Env {
   KAI_MENTION_USER_ID?: string;
   KAI_ACCESSIBLE_CHANNEL_IDS?: string;
   KAI_LISTEN_CHANNEL_IDS?: string;
+  KAI_DM_INGRESS_ENABLED?: string;
+  KAI_DM_USER_IDS?: string;
   KAI_DISCORD_LISTENER_ENABLED?: string;
   KAI_DISCORD_DELIVERY_ENABLED?: string;
   KAI_HARNESS_API_KEY?: string;
@@ -133,6 +135,8 @@ interface ActivityDebug {
   skipContinuity?: boolean;
   continuityRole?: 'human' | 'companion';
   peerWake?: TrustedPeerWakeMetadata;
+  conversationId?: string;
+  isDm?: boolean;
 }
 
 interface ActiveConversation {
@@ -202,6 +206,14 @@ function isKaiHarnessAuthorized(request: Request, env: Env): boolean {
 
 function isKaiHarnessDeliveryChannel(env: Env, channelId: string): boolean {
   return splitIds(env.KAI_HARNESS_DELIVERY_CHANNEL_IDS).includes(channelId);
+}
+
+function isKaiDmIngressEnabled(env: Env): boolean {
+  return env.KAI_DM_INGRESS_ENABLED === 'true';
+}
+
+function getKaiDmUserIds(env: Env): string[] {
+  return splitIds(env.KAI_DM_USER_IDS);
 }
 
 function isKaiAutorespondEnabled(env: Env): boolean {
@@ -1677,6 +1689,59 @@ export class CompanionBot extends McpAgent<Env> {
     }
   }
 
+  private isKaiDmChannel(channelId: string): boolean {
+    this.ensureTable();
+    return this.ctx.storage.sql.exec(
+      `SELECT 1 FROM discord_monitors WHERE channel_id = ? AND added_by = 'KAI_DM_USER_IDS' LIMIT 1`,
+      channelId
+    ).toArray().length > 0;
+  }
+
+  private async prepareKaiDmChannel(userId: string): Promise<string> {
+    const cacheKey = `kai:dm-user:${userId}`;
+    const cachedChannelId = await this.ctx.storage.get<string>(cacheKey);
+    if (cachedChannelId && /^\d+$/.test(cachedChannelId) && this.isKaiDmChannel(cachedChannelId)) {
+      return cachedChannelId;
+    }
+    const dm = await discordRequest(this.env, '/users/@me/channels', {
+      method: 'POST',
+      body: JSON.stringify({ recipient_id: userId }),
+    });
+    const channelId = String(dm?.id || '').trim();
+    if (dm?.error || !/^\d+$/.test(channelId)) {
+      throw new Error(`Discord did not return a DM channel for approved user ${userId}`);
+    }
+    const now = Date.now();
+    this.ctx.storage.sql.exec(
+      `INSERT OR IGNORE INTO discord_monitors (id, channel_id, label, tier, enabled, respond_enabled, response_mode, last_checked, cooldown_ms, last_responded, added_by, added_at)
+       VALUES (?, ?, 'direct-message', 'fast', 1, 1, 'open', 0, 0, 0, 'KAI_DM_USER_IDS', ?)`,
+      `monitor:dm:${channelId}`, channelId, now
+    );
+    this.ctx.storage.sql.exec(
+      `UPDATE discord_monitors
+       SET label = 'direct-message', tier = 'fast', enabled = 1, respond_enabled = 1,
+           response_mode = 'open', cooldown_ms = 0, added_by = 'KAI_DM_USER_IDS'
+       WHERE channel_id = ?`,
+      channelId
+    );
+    await this.ctx.storage.put(cacheKey, channelId);
+    return channelId;
+  }
+
+  private async ensureKaiDmMonitors(): Promise<number> {
+    if (!isKaiDmIngressEnabled(this.env)) return 0;
+    let prepared = 0;
+    for (const userId of getKaiDmUserIds(this.env)) {
+      try {
+        await this.prepareKaiDmChannel(userId);
+        prepared += 1;
+      } catch (error) {
+        console.warn('[kai-dm] failed to prepare approved DM channel', error);
+      }
+    }
+    return prepared;
+  }
+
   getMonitors(): DiscordMonitor[] {
     this.ensureTable();
     return this.ctx.storage.sql.exec(`SELECT * FROM discord_monitors ORDER BY added_at ASC`).toArray().map((row: any) => ({
@@ -1904,7 +1969,7 @@ export class CompanionBot extends McpAgent<Env> {
     const awaitsAxiomTrustGate = isHumanTrigger && normalizeDiscordCompanionId(companionId) === 'axiom';
     return postContinuityEvent(this.env, {
       companion_id: companionId,
-      conversation_id: `discord:${channelId || 'unknown'}`,
+      conversation_id: debug?.conversationId || `discord:${channelId || 'unknown'}`,
       external_message_id: isAudit ? `${messageId}:${type}` : messageId,
       role: isAudit ? 'system' : (isHumanTrigger ? (debug?.continuityRole || 'human') : 'companion'),
       author: { id: debug?.authorId || undefined, name: author || (isHumanTrigger ? 'unknown' : companionId) },
@@ -1913,6 +1978,7 @@ export class CompanionBot extends McpAgent<Env> {
       metadata: {
         activity_type: type,
         channel_id: channelId,
+        is_dm: debug?.isDm === true,
         has_webhook_url: Boolean(webhookUrl),
         ...(debug?.engagement ? engagementDebug(debug.engagement) : {}),
         mention_ids: debug?.mentionIds || [],
@@ -3527,6 +3593,20 @@ export class CompanionBot extends McpAgent<Env> {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
+    if (url.pathname === '/api/runner/kai/dm-channel' && request.method === 'POST') {
+      const body = await request.json().catch(() => null) as { user_id?: string } | null;
+      const userId = String(body?.user_id || '').trim();
+      if (!isKaiDmIngressEnabled(this.env) || !getKaiDmUserIds(this.env).includes(userId)) {
+        return Response.json({ error: 'Kai DM ingress is not approved for this user' }, { status: 403 });
+      }
+      try {
+        const channelId = await this.prepareKaiDmChannel(userId);
+        return Response.json({ ok: true, conversation_id: `discord-dm:${channelId}`, channel_id: channelId });
+      } catch (error) {
+        return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 502 });
+      }
+    }
+
     if (url.pathname === '/api/runner/kai/deliver' && request.method === 'POST') {
       const body = await request.json().catch(() => null) as KaiHarnessDeliveryRequest | null;
       const responseEventId = String(body?.response_event_id || '').trim();
@@ -3537,10 +3617,22 @@ export class CompanionBot extends McpAgent<Env> {
       if (!responseEventId || !candidateId || candidateId.length > 160 || !/^\d+$/.test(channelId) || !content.trim()) {
         return Response.json({ error: 'response_event_id, wake_candidate_id, channel_id, and content are required' }, { status: 400 });
       }
+      if (!isKaiHarnessDeliveryChannel(this.env, channelId) && !this.isKaiDmChannel(channelId)) {
+        return Response.json({ error: 'Channel is not approved for Kai harness delivery' }, { status: 403 });
+      }
 
       const receiptKey = `kai:harness-delivery:${responseEventId}`;
       const existing = await this.ctx.storage.get<KaiHarnessDeliveryReceipt>(receiptKey);
-      if (existing?.completed) return Response.json({ ok: true, replayed: true, ...existing });
+      if (existing?.completed) {
+        if (/^\d+$/.test(replyToMessageId)) {
+          this.ctx.storage.sql.exec(
+            `DELETE FROM pending_commands
+             WHERE companion_id IN ('kai', 'kaisoryth') AND channel_id = ? AND message_id = ?`,
+            channelId, replyToMessageId
+          );
+        }
+        return Response.json({ ok: true, replayed: true, ...existing });
+      }
 
       const chunks = splitMessage(content);
       const receipt: KaiHarnessDeliveryReceipt = existing || {
@@ -3579,6 +3671,21 @@ export class CompanionBot extends McpAgent<Env> {
 
       receipt.completed = true;
       await this.ctx.storage.put(receiptKey, receipt);
+      if (/^\d+$/.test(replyToMessageId)) {
+        this.ctx.storage.sql.exec(
+          `DELETE FROM pending_commands
+           WHERE companion_id IN ('kai', 'kaisoryth') AND channel_id = ? AND message_id = ?`,
+          channelId, replyToMessageId
+        );
+      }
+      await this.ctx.storage.put('kai:last_harness_delivery', {
+        response_event_id: responseEventId,
+        wake_candidate_id: candidateId,
+        channel_id: channelId,
+        surface: this.isKaiDmChannel(channelId) ? 'discord-dm' : 'discord',
+        sent_message_ids: receipt.sent_message_ids,
+        completed_at: new Date().toISOString(),
+      });
       return Response.json({ ok: true, replayed: false, ...receipt });
     }
 
@@ -4210,10 +4317,24 @@ export class CompanionBot extends McpAgent<Env> {
       const pending = this.getPending();
       const companions = this.getAllCompanions();
       const monitors = this.getMonitors();
-      const watchChannels = monitors.map(m => m.channel_id);
+      const dmChannelIds = new Set(monitors.filter(m => m.added_by === 'KAI_DM_USER_IDS').map(m => m.channel_id));
+      const publicMonitors = monitors.filter(m => !dmChannelIds.has(m.channel_id));
+      const watchChannels = publicMonitors.map(m => m.channel_id);
       const lastPollDebug = await this.ctx.storage.get('last_poll_debug');
       const lastKaiRunnerResult = await this.ctx.storage.get('kai:last_runner_result');
-      const kaiPending = await this.kaiPendingDiagnostics(pending);
+      const lastKaiHarnessDelivery = await this.ctx.storage.get<Record<string, unknown>>('kai:last_harness_delivery');
+      const kaiPending = (await this.kaiPendingDiagnostics(pending)).map(item => ({
+        ...item,
+        channel_id: dmChannelIds.has(String(item.channel_id || '')) ? '[direct-message]' : item.channel_id,
+      }));
+      const sanitizePollChannels = (value: unknown): unknown => {
+        if (Array.isArray(value)) return value.map(sanitizePollChannels);
+        if (!value || typeof value !== 'object') return dmChannelIds.has(String(value || '')) ? '[direct-message]' : value;
+        return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+          key,
+          key === 'channel_id' && dmChannelIds.has(String(item || '')) ? '[direct-message]' : sanitizePollChannels(item),
+        ]));
+      };
       const lastKaiFailure = this.getActivity('kai', 50).find(activity =>
         ['runner_retry', 'runner_failed', 'expired'].includes(String(activity.type || ''))
       ) || null;
@@ -4259,6 +4380,9 @@ export class CompanionBot extends McpAgent<Env> {
           guild_configured: Boolean(this.env.KAI_GUILD_ID),
           category_configured: Boolean(this.env.KAI_CATEGORY_ID),
           mention_user_configured: Boolean(this.env.KAI_MENTION_USER_ID || this.env.KAI_DISCORD_USER_IDS),
+          dm_ingress_enabled: isKaiDmIngressEnabled(this.env),
+          dm_user_count: getKaiDmUserIds(this.env).length,
+          dm_monitor_count: dmChannelIds.size,
           listen_channel_count: getKaiListenChannelIds(this.env).length,
           social_hard_channel_count: getKaiSocialHardTagChannelIds(this.env).length,
           social_soft_channel_count: getKaiSocialSoftTagChannelIds(this.env).length,
@@ -4266,20 +4390,32 @@ export class CompanionBot extends McpAgent<Env> {
           accessible_channel_count: getKaiAccessibleChannelIds(this.env).length,
         },
         watch_channels: channelDetails,
-        monitors,
+        monitors: publicMonitors,
         servers,
         kai_pending: kaiPending,
         last_kai_failure: lastKaiFailure ? {
           type: lastKaiFailure.type,
-          channel_id: lastKaiFailure.channel_id || null,
+          channel_id: dmChannelIds.has(String(lastKaiFailure.channel_id || '')) ? '[direct-message]' : (lastKaiFailure.channel_id || null),
           message_id: lastKaiFailure.message_id || null,
           author: lastKaiFailure.author || null,
           age_seconds: lastKaiFailure.age_seconds,
           content_preview: String(lastKaiFailure.content || '').slice(0, 300),
           engagement: lastKaiFailure.engagement || null,
         } : null,
-        last_poll_debug: lastPollDebug || null,
-        last_kai_runner_result: lastKaiRunnerResult || null,
+        last_poll_debug: sanitizePollChannels(lastPollDebug || null),
+        last_kai_runner_result: lastKaiRunnerResult && typeof lastKaiRunnerResult === 'object' ? {
+          ...(lastKaiRunnerResult as Record<string, unknown>),
+          channel_id: dmChannelIds.has(String((lastKaiRunnerResult as Record<string, unknown>).channel_id || ''))
+            ? '[direct-message]'
+            : (lastKaiRunnerResult as Record<string, unknown>).channel_id,
+        } : null,
+        last_kai_harness_delivery: lastKaiHarnessDelivery ? {
+          response_event_id: lastKaiHarnessDelivery.response_event_id || null,
+          wake_candidate_id: lastKaiHarnessDelivery.wake_candidate_id || null,
+          surface: lastKaiHarnessDelivery.surface || null,
+          sent_count: Array.isArray(lastKaiHarnessDelivery.sent_message_ids) ? lastKaiHarnessDelivery.sent_message_ids.length : 0,
+          completed_at: lastKaiHarnessDelivery.completed_at || null,
+        } : null,
       }, null, 2), {
         headers: { 'Content-Type': 'application/json' },
       });
@@ -4415,6 +4551,7 @@ export class CompanionBot extends McpAgent<Env> {
 
   // Cron: poll Discord channels for new messages with trigger words
   async handlePoll(): Promise<Response> {
+    const preparedDmMonitors = await this.ensureKaiDmMonitors();
     const monitors = this.getMonitors().filter(m => m.enabled);
     const startedAt = Date.now();
     const pollDebug: any = {
@@ -4429,6 +4566,7 @@ export class CompanionBot extends McpAgent<Env> {
       logged: 0,
       ignored: 0,
       peer_reasons: {} as Record<string, number>,
+      dm_monitors_prepared: preparedDmMonitors,
     };
 
     if (monitors.length === 0) {
@@ -4514,6 +4652,71 @@ export class CompanionBot extends McpAgent<Env> {
           // Skip events with neither text nor attachment metadata.
           if (!messageHasUsableContent(msg)) continue;
           msg.content = String(msg.content || '');
+
+          if (
+            monitor.added_by === 'KAI_DM_USER_IDS'
+            && !isWebhook
+            && !isBot
+            && isKaiListenerEnabled(this.env)
+            && isVelDiscordAuthor(this.env, msg.author?.id)
+          ) {
+            const companion = this.getCompanionById('kai');
+            if (!companion) continue;
+            const authorName = discordAuthorNameForKai(this.env, msg.author);
+            const recentContext = await this.recentContextForMessage(channelId, msg, messages);
+            const attachments = await this.kaiAttachmentsForMessage(channelId, msg);
+            const engagement: EngagementDecision = {
+              disposition: 'respond',
+              trigger_reason: 'vel-direct-message',
+              priority: 'high',
+              hard_mention: false,
+              soft_name_mention: false,
+              active_conversation: true,
+              direct_reply_to_kai: true,
+              other_user_tag: false,
+              author_class: 'vel',
+              community_greeting: false,
+            };
+            const command: PendingCommand = {
+              id: crypto.randomUUID(),
+              companion_id: companion.id,
+              content: msg.content,
+              author: { username: authorName, id: msg.author?.id },
+              channel_id: channelId,
+              channel_label: 'direct-message',
+              disposition: 'respond',
+              trigger_reason: engagement.trigger_reason,
+              priority: 'high',
+              source: 'poll',
+              message_id: msg.id,
+              mention_ids: normalizeMentionIds(msg.mentions),
+              referenced_author_id: String(msg.referenced_message?.author?.id || '').trim() || undefined,
+              response_mode: 'open',
+              recent_context: recentContext,
+              attachments,
+              engagement,
+              timestamp: Date.parse(msg.timestamp) || Date.now(),
+            };
+            if (!this.storeCommand(command)) {
+              pollDebug.duplicates++;
+              continue;
+            }
+            const continuityWrite = this.logActivity(companion.id, 'queued', channelId, msg.content, authorName, msg.id, undefined, {
+              authorId: msg.author?.id,
+              engagement,
+              mentionIds: command.mention_ids,
+              referencedAuthorId: command.referenced_author_id,
+              attachments,
+              createdAt: msg.timestamp,
+              conversationId: `discord-dm:${channelId}`,
+              isDm: true,
+            });
+            if (continuityWrite) await continuityWrite;
+            totalStored++;
+            await this.scheduleKaiAutoresponder();
+            console.log(`Cron: ${companion.name} direct message queued from approved owner`);
+            continue;
+          }
 
           const peerTargetModes = new Map<string, TrustedPeerTargetMode>();
           if (peerAuthorCompanion) {
@@ -6816,6 +7019,23 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
+    if (url.pathname === '/api/runner/kai/dm-channel' && request.method === 'POST') {
+      if (!isKaiHarnessAuthorized(request, env)) {
+        return Response.json({ error: 'Unauthorized' }, { status: 401, headers: { 'Cache-Control': 'no-store' } });
+      }
+      if (!isKaiDmIngressEnabled(env)) {
+        return Response.json({ error: 'Kai DM ingress is disabled' }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+      }
+      const body = await request.clone().json().catch(() => null) as { user_id?: string } | null;
+      const userId = String(body?.user_id || '').trim();
+      if (!getKaiDmUserIds(env).includes(userId)) {
+        return Response.json({ error: 'User is not approved for Kai DM ingress' }, { status: 403, headers: { 'Cache-Control': 'no-store' } });
+      }
+      const id = env.COMPANION_BOT.idFromName('default');
+      const stub = env.COMPANION_BOT.get(id);
+      return stub.fetch(new Request('https://internal/api/runner/kai/dm-channel', request));
+    }
+
     if (url.pathname === '/api/runner/kai/deliver' && request.method === 'POST') {
       if (!isKaiHarnessAuthorized(request, env)) {
         return Response.json({ error: 'Unauthorized' }, { status: 401, headers: { 'Cache-Control': 'no-store' } });
@@ -6825,7 +7045,7 @@ export default {
       }
       const body = await request.clone().json().catch(() => null) as KaiHarnessDeliveryRequest | null;
       const channelId = String(body?.channel_id || '').trim();
-      if (!/^\d+$/.test(channelId) || !isKaiHarnessDeliveryChannel(env, channelId)) {
+      if (!/^\d+$/.test(channelId) || (!isKaiHarnessDeliveryChannel(env, channelId) && !isKaiDmIngressEnabled(env))) {
         return Response.json({ error: 'Channel is not approved for Kai harness delivery' }, { status: 403, headers: { 'Cache-Control': 'no-store' } });
       }
       const id = env.COMPANION_BOT.idFromName('default');

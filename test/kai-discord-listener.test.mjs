@@ -319,7 +319,7 @@ test('Kai autoresponder retries transient runner failures before dropping requir
 test('Kai status exposes pending retry diagnostics and latest failure', () => {
   assert.match(source, /private async kaiPendingDiagnostics\(pending: PendingCommand\[\]\)/);
   assert.match(source, /retry_count: await this\.getKaiAutoresponderRetryCount\(command\.id\)/);
-  assert.match(source, /const kaiPending = await this\.kaiPendingDiagnostics\(pending\)/);
+  assert.match(source, /this\.kaiPendingDiagnostics\(pending\)\)\.map/);
   assert.match(source, /const lastKaiFailure = this\.getActivity\('kai', 50\)\.find/);
   assert.match(source, /kai_pending: kaiPending/);
   assert.match(source, /last_kai_failure: lastKaiFailure/);
@@ -358,7 +358,7 @@ test('Kai generated images are normalized, delivered to Discord, and logged with
   assert.match(source, /continuity_response_event_id: continuityResponse\?\.event\?\.id \|\| null/);
   assert.match(source, /sent_message_ids: allSentMessageIds/);
   assert.match(source, /continuity_metadata_recorded: Boolean\(continuityResponse\?\.event\?\.id \|\| allSentMessageIds\.length\)/);
-  assert.match(source, /last_kai_runner_result: lastKaiRunnerResult \|\| null/);
+  assert.match(source, /last_kai_runner_result: lastKaiRunnerResult && typeof lastKaiRunnerResult === 'object'/);
 });
 
 test('Kai Discord transcript path is Continuity first, not NESTchat or rooms-worker', () => {
@@ -366,7 +366,7 @@ test('Kai Discord transcript path is Continuity first, not NESTchat or rooms-wor
   assert.match(source, /CREATE TABLE IF NOT EXISTS pending_commands/);
   assert.match(source, /function discordContinuityContent\(content: unknown, attachments\?: unknown\): string/);
   assert.match(source, /postContinuityEvent\(this\.env/);
-  assert.match(source, /conversation_id: `discord:\$\{channelId \|\| 'unknown'\}`/);
+  assert.match(source, /conversation_id: debug\?\.conversationId \|\| `discord:\$\{channelId \|\| 'unknown'\}`/);
   assert.match(source, /external_message_id: isAudit \? `\$\{messageId\}:\$\{type\}` : messageId/);
   assert.match(source, /createAndClaimWakeForCommand\(env: Env, command: PendingCommand/);
   assert.match(source, /pre_response_required: true/);
@@ -428,4 +428,35 @@ test('Kai bypasses legacy Kairos trigger path and legacy send tools', () => {
   assert.match(source, /Cron: logged Kai transcript and skipped legacy Kai path/);
   assert.match(source, /Legacy pending_commands respond is disabled for Kai/);
   assert.match(source, /Legacy companion send is disabled for Kai/);
+});
+
+test('Kai DM promotion keeps the Worker as the single fenced ingress adapter', () => {
+  assert.match(source, /KAI_DM_INGRESS_ENABLED\?: string/);
+  assert.match(source, /KAI_DM_USER_IDS\?: string/);
+  assert.match(source, /private async prepareKaiDmChannel\(userId: string\): Promise<string>/);
+  assert.match(source, /\/users\/@me\/channels/);
+  assert.match(source, /recipient_id: userId/);
+  assert.match(source, /added_by = 'KAI_DM_USER_IDS'/);
+  assert.match(source, /monitor\.added_by === 'KAI_DM_USER_IDS'/);
+  assert.match(source, /trigger_reason: 'vel-direct-message'/);
+  assert.match(source, /conversationId: `discord-dm:\$\{channelId\}`/);
+  assert.match(source, /isDm: true/);
+});
+
+test('Kai DM preparation and delivery remain harness-authenticated and allowlisted', () => {
+  assert.match(source, /url\.pathname === '\/api\/runner\/kai\/dm-channel'/);
+  assert.match(source, /isKaiHarnessAuthorized\(request, env\)/);
+  assert.match(source, /getKaiDmUserIds\(env\)\.includes\(userId\)/);
+  assert.match(source, /!isKaiHarnessDeliveryChannel\(this\.env, channelId\) && !this\.isKaiDmChannel\(channelId\)/);
+  assert.match(source, /Channel is not approved for Kai harness delivery/);
+  assert.match(source, /DELETE FROM pending_commands[\s\S]{0,180}message_id = \?/);
+  assert.match(source, /'kai:last_harness_delivery'/);
+});
+
+test('public status redacts Kai DM channel identifiers', () => {
+  assert.match(source, /const dmChannelIds = new Set/);
+  assert.match(source, /const publicMonitors = monitors\.filter\(m => !dmChannelIds\.has\(m\.channel_id\)\)/);
+  assert.match(source, /'\[direct-message\]'/);
+  assert.match(source, /dm_ingress_enabled: isKaiDmIngressEnabled\(this\.env\)/);
+  assert.match(source, /dm_monitor_count: dmChannelIds\.size/);
 });

@@ -281,6 +281,8 @@ Add `https://YOUR-WORKER.workers.dev/auth/callback` as a redirect URI in your Di
 | PUT | `/api/companions/:id/channels` | Session | Update channel settings |
 | GET | `/api/companions/:id/activity` | No | Get activity stream |
 | GET | `/api/status` | No | Bot status |
+| POST | `/api/runner/kai/deliver` | Harness bearer | Idempotent Kai delivery to an approved guild or prepared DM channel |
+| POST | `/api/runner/kai/dm-channel` | Harness bearer | Resolve and prepare an approved Kai DM conversation before promotion |
 | GET | `/auth/discord` | No | Start OAuth flow |
 | POST | `/auth/logout` | No | End session |
 | `/mcp` | — | No | MCP Streamable HTTP |
@@ -303,6 +305,12 @@ src/
 - **Cron trigger** — polls Discord every minute, detects triggers, stores pending commands
 - **MCP server** — 14 consolidated tools exposed via SSE and Streamable HTTP transports
 - **Webhook dispatch** — responses sent with companion name + avatar via Discord webhooks
+
+Kai DM ingress is opt-in. Set `KAI_DM_INGRESS_ENABLED=true` and keep
+`KAI_DM_USER_IDS` restricted to explicitly approved human user IDs. The harness
+must call `/api/runner/kai/dm-channel` before adding the returned
+`discord-dm:<channel-id>` conversation to its claim scope. DM channel IDs are
+kept out of the public status payload.
 
 ---
 
