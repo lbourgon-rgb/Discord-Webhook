@@ -266,6 +266,27 @@ test('Kai Nexus runner stays guarded behind explicit flags and wake leases', () 
   assert.match(source, /async alarm\(\) \{[\s\S]+await this\.serviceKaiAutoresponderQueue\(\)/);
 });
 
+test('Kai harness delivery is authenticated, allowlisted, gated, and idempotent', () => {
+  assert.match(source, /KAI_HARNESS_API_KEY\?: string/);
+  assert.match(source, /KAI_HARNESS_DELIVERY_CHANNEL_IDS\?: string/);
+  assert.match(source, /function isKaiHarnessAuthorized\(request: Request, env: Env\): boolean/);
+  assert.match(source, /if \(!isKaiDeliveryEnabled\(env\)\)/);
+  assert.match(source, /isKaiHarnessDeliveryChannel\(env, channelId\)/);
+  assert.match(source, /kai:harness-delivery:\$\{responseEventId\}/);
+  assert.match(source, /enforce_nonce: true/);
+  assert.match(source, /allowed_mentions: \{ parse: \[\] \}/);
+  assert.match(source, /existing\?\.completed/);
+});
+
+test('Kai fallback delegates before generation and fences Continuity before Discord delivery', () => {
+  assert.match(source, /class KaiRunnerDelegatedError extends Error/);
+  assert.match(source, /claim\?\.delegated_to_runner === true/);
+  assert.match(source, /X-Nexus-Kai-Decision'\) === 'delegated_to_runner'/);
+  const accepted = source.indexOf('const continuityResponse = await continuityRequest', source.indexOf('async runKaiNexusRunner'));
+  const delivered = source.indexOf('const sentMessageIds: string[] = []', accepted);
+  assert.ok(accepted > 0 && delivered > accepted, 'Continuity response acceptance must precede Discord sends');
+});
+
 test('Kai hard-tag autoresponses do not leave empty generated replies pending', () => {
   assert.match(source, /function isRequiredKaiReply\(command: PendingCommand, runnerResult: any\): boolean/);
   assert.match(source, /runnerResult\?\.should_respond === true/);

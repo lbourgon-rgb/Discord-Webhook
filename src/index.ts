@@ -57,6 +57,8 @@ interface Env {
   KAI_LISTEN_CHANNEL_IDS?: string;
   KAI_DISCORD_LISTENER_ENABLED?: string;
   KAI_DISCORD_DELIVERY_ENABLED?: string;
+  KAI_HARNESS_API_KEY?: string;
+  KAI_HARNESS_DELIVERY_CHANNEL_IDS?: string;
   KAI_DISCORD_AUTORESPOND?: string;
   KAI_RUNNER_ROUTE?: string;
   KAI_NEXUS_URL?: string;
@@ -191,6 +193,15 @@ function isKaiListenerEnabled(env: Env): boolean {
 
 function isKaiDeliveryEnabled(env: Env): boolean {
   return env.KAI_DISCORD_DELIVERY_ENABLED === 'true';
+}
+
+function isKaiHarnessAuthorized(request: Request, env: Env): boolean {
+  const configured = String(env.KAI_HARNESS_API_KEY || '').trim();
+  return configured.length > 0 && request.headers.get('Authorization') === `Bearer ${configured}`;
+}
+
+function isKaiHarnessDeliveryChannel(env: Env, channelId: string): boolean {
+  return splitIds(env.KAI_HARNESS_DELIVERY_CHANNEL_IDS).includes(channelId);
 }
 
 function isKaiAutorespondEnabled(env: Env): boolean {
@@ -668,6 +679,13 @@ async function continuityRequest(env: Env, path: string, init: RequestInit): Pro
   return data;
 }
 
+class KaiRunnerDelegatedError extends Error {
+  constructor() {
+    super('delegated_to_runner');
+    this.name = 'KaiRunnerDelegatedError';
+  }
+}
+
 function nexusRunnerApiKey(env: Env): string | undefined {
   return env.NEXUS_RUNNER_API_KEY;
 }
@@ -684,6 +702,10 @@ async function callNexusKaiRunner(env: Env, body: Record<string, unknown>): Prom
     body: JSON.stringify(body),
   });
   const response = env.NEXUS ? await env.NEXUS.fetch(request) : await fetch(request);
+  if (response.status === 202 && response.headers.get('X-Nexus-Kai-Decision') === 'delegated_to_runner') {
+    await response.body?.cancel();
+    throw new KaiRunnerDelegatedError();
+  }
   const text = await response.text();
   let data: any = text;
   try {
@@ -814,6 +836,7 @@ async function createAndClaimWakeForCommand(env: Env, command: PendingCommand, r
       lease_seconds: leaseSeconds,
     }),
   });
+  if (claim?.delegated_to_runner === true) throw new KaiRunnerDelegatedError();
   if (!claim?.claimed || !claim?.wake_candidate?.id) {
     throw new Error(`No wake candidate could be claimed for event ${eventId}`);
   }
@@ -829,13 +852,24 @@ async function releaseWakeCandidate(
   runnerId: string,
   failureReason?: string,
   releaseStatus?: 'released' | 'failed' | 'skipped',
+  leaseEpoch?: number,
+  runnerEpoch?: number,
 ): Promise<any> {
+  let effectiveLeaseEpoch = leaseEpoch;
+  let effectiveRunnerEpoch = runnerEpoch;
+  if (!effectiveLeaseEpoch) {
+    const context = await continuityRequest(env, `/wake-candidates/${encodeURIComponent(candidateId)}/context`, { method: 'GET' });
+    effectiveLeaseEpoch = Number(context?.wake_candidate?.lease_epoch) || undefined;
+    effectiveRunnerEpoch = Number(context?.wake_candidate?.runner_epoch) || undefined;
+  }
   return continuityRequest(env, `/wake-candidates/${encodeURIComponent(candidateId)}/release`, {
     method: 'POST',
     body: JSON.stringify({
       runner_id: runnerId,
       status: releaseStatus || (failureReason ? 'skipped' : 'released'),
       failure_reason: failureReason || null,
+      lease_epoch: effectiveLeaseEpoch,
+      runner_epoch: effectiveRunnerEpoch,
     }),
   });
 }
@@ -1311,6 +1345,32 @@ function splitMessage(content: string, maxLength: number = 2000): string[] {
     remaining = remaining.slice(splitAt).replace(/^\n/, '');
   }
   return chunks;
+}
+
+interface KaiHarnessDeliveryRequest {
+  response_event_id: string;
+  wake_candidate_id: number;
+  channel_id: string;
+  reply_to_message_id?: string;
+  content: string;
+}
+
+interface KaiHarnessDeliveryReceipt {
+  response_event_id: string;
+  wake_candidate_id: number;
+  channel_id: string;
+  sent_message_ids: string[];
+  next_chunk: number;
+  completed: boolean;
+}
+
+async function kaiHarnessDiscordNonce(responseEventId: string, chunkIndex: number): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(`kai-harness:${responseEventId}:${chunkIndex}`),
+  );
+  const value = new DataView(digest).getBigUint64(0) & ((1n << 63n) - 1n);
+  return value.toString(10);
 }
 
 // ========== Durable Object: CompanionBot ==========
@@ -3133,6 +3193,31 @@ export class CompanionBot extends McpAgent<Env> {
       const companion = this.getCompanionById(command.companion_id);
       if (!companion) throw new Error(`Unknown companion: ${command.companion_id}`);
       const targetWebhookUrl = this.shouldUseWebhookForCompanion(command.companion_id) ? command.webhook_url : null;
+      // Fence the response in Continuity before touching Discord. A stale
+      // owner must receive 409 while there is still nothing public to undo.
+      const continuityResponse = await continuityRequest(this.env, `/wake-candidates/${encodeURIComponent(String(claimData.wake_candidate.id))}/response`, {
+        method: 'POST',
+        body: JSON.stringify({
+          runner_id: runnerId,
+          lease_epoch: claimData.wake_candidate.lease_epoch,
+          runner_epoch: claimData.wake_candidate.runner_epoch,
+          content: deliveryResponse,
+          author: { id: 'kaisoryth', name: companion.name },
+          metadata: {
+            runner: runnerSource,
+            runner_origin: origin,
+            delivery_path: kaiRunnerDeliveryPath(runnerSource),
+            delivery_status: 'accepted-before-delivery',
+            surface: 'discord',
+            request_id: requestId,
+            channel_id: command.channel_id,
+            runner_image_generation: runnerImageGeneration,
+            runner_vision: runnerVision,
+            runner_workspace: runnerWorkspace,
+            tahl_state_present: Boolean(claimData.wake_context?.tahl_state && Object.keys(claimData.wake_context.tahl_state).length),
+          },
+        }),
+      });
       const sentMessageIds: string[] = [];
       let sentWebhookUrl: string | undefined;
       if (targetWebhookUrl) {
@@ -3167,32 +3252,6 @@ export class CompanionBot extends McpAgent<Env> {
       const generatedImageMetadata = kaiGeneratedImageMetadata(generatedImages, sentImageMessageIds);
       const allSentMessageIds = [...sentMessageIds, ...sentImageMessageIds];
 
-      const continuityResponse = await continuityRequest(this.env, `/wake-candidates/${encodeURIComponent(String(claimData.wake_candidate.id))}/response`, {
-        method: 'POST',
-        body: JSON.stringify({
-          runner_id: runnerId,
-          content: deliveryResponse,
-          external_message_id: allSentMessageIds[allSentMessageIds.length - 1] || `discord-dashboard-runner:${requestId}`,
-          author: { id: 'kaisoryth', name: companion.name },
-          metadata: {
-            runner: runnerSource,
-            runner_origin: origin,
-            delivery_path: kaiRunnerDeliveryPath(runnerSource),
-            delivery_status: 'delivered',
-            surface: 'discord',
-            request_id: requestId,
-            channel_id: command.channel_id,
-            sent_message_ids: allSentMessageIds,
-            sent_text_message_ids: sentMessageIds,
-            sent_image_message_ids: sentImageMessageIds,
-            generated_images: generatedImageMetadata,
-            runner_image_generation: runnerImageGeneration,
-            runner_vision: runnerVision,
-            runner_workspace: runnerWorkspace,
-            tahl_state_present: Boolean(claimData.wake_context?.tahl_state && Object.keys(claimData.wake_context.tahl_state).length),
-          },
-        }),
-      });
       await this.recordKaiRunnerStatus(command, {
         ok: true,
         mode: 'delivered',
@@ -3228,6 +3287,22 @@ export class CompanionBot extends McpAgent<Env> {
         response: deliveryResponse,
       }, null, 2), { headers: { 'Content-Type': 'application/json' } });
     } catch (error) {
+      if (error instanceof KaiRunnerDelegatedError) {
+        await this.recordKaiRunnerStatus(command, {
+          ok: true,
+          mode: 'delegated_to_runner',
+          runner_origin: origin,
+          continuity_event_id: claimData?.event_id || null,
+          wake_candidate_id: claimData?.wake_candidate?.id || null,
+        });
+        return new Response(null, {
+          status: 202,
+          headers: {
+            'Cache-Control': 'no-store',
+            'X-Nexus-Kai-Decision': 'delegated_to_runner',
+          },
+        });
+      }
       const errorText = error instanceof Error ? error.message : String(error);
       const transient = isTransientKaiRunnerServiceError(500, errorText);
       if (claimData?.wake_candidate?.id) {
@@ -3451,6 +3526,61 @@ export class CompanionBot extends McpAgent<Env> {
   // Override fetch to handle trigger and pending endpoints
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+
+    if (url.pathname === '/api/runner/kai/deliver' && request.method === 'POST') {
+      const body = await request.json().catch(() => null) as KaiHarnessDeliveryRequest | null;
+      const responseEventId = String(body?.response_event_id || '').trim();
+      const channelId = String(body?.channel_id || '').trim();
+      const content = String(body?.content || '');
+      const candidateId = Number(body?.wake_candidate_id);
+      const replyToMessageId = String(body?.reply_to_message_id || '').trim();
+      if (!responseEventId || !/^\d+$/.test(channelId) || !Number.isInteger(candidateId) || candidateId <= 0 || !content.trim()) {
+        return Response.json({ error: 'response_event_id, wake_candidate_id, channel_id, and content are required' }, { status: 400 });
+      }
+
+      const receiptKey = `kai:harness-delivery:${responseEventId}`;
+      const existing = await this.ctx.storage.get<KaiHarnessDeliveryReceipt>(receiptKey);
+      if (existing?.completed) return Response.json({ ok: true, replayed: true, ...existing });
+
+      const chunks = splitMessage(content);
+      const receipt: KaiHarnessDeliveryReceipt = existing || {
+        response_event_id: responseEventId,
+        wake_candidate_id: candidateId,
+        channel_id: channelId,
+        sent_message_ids: [],
+        next_chunk: 0,
+        completed: false,
+      };
+      if (receipt.wake_candidate_id !== candidateId || receipt.channel_id !== channelId) {
+        return Response.json({ error: 'response_event_id is already bound to a different delivery target' }, { status: 409 });
+      }
+
+      for (let index = receipt.next_chunk; index < chunks.length; index += 1) {
+        const messageBody: Record<string, unknown> = {
+          content: chunks[index],
+          nonce: await kaiHarnessDiscordNonce(responseEventId, index),
+          enforce_nonce: true,
+          allowed_mentions: { parse: [] },
+        };
+        if (index === 0 && /^\d+$/.test(replyToMessageId)) {
+          messageBody.message_reference = { message_id: replyToMessageId, fail_if_not_exists: false };
+        }
+        const result = await discordRequest(this.env, `/channels/${channelId}/messages`, {
+          method: 'POST',
+          body: JSON.stringify(messageBody),
+        });
+        if (result?.error || !result?.id) {
+          return Response.json({ error: 'Discord delivery failed', status: result?.status || 502 }, { status: 502 });
+        }
+        receipt.sent_message_ids[index] = String(result.id);
+        receipt.next_chunk = index + 1;
+        await this.ctx.storage.put(receiptKey, receipt);
+      }
+
+      receipt.completed = true;
+      await this.ctx.storage.put(receiptKey, receipt);
+      return Response.json({ ok: true, replayed: false, ...receipt });
+    }
 
     if (url.pathname === '/trigger' && request.method === 'POST') {
       return this.handleTrigger(request);
@@ -5395,6 +5525,8 @@ export class CompanionBot extends McpAgent<Env> {
                 method: 'POST',
                 body: JSON.stringify({
                   runner_id: activeRunnerId,
+                  lease_epoch: claimData.wake_candidate.lease_epoch,
+                  runner_epoch: claimData.wake_candidate.runner_epoch,
                   content: generatedResponse,
                   external_message_id: sentMessageIds[sentMessageIds.length - 1] || `discord-runner:${requestId}`,
                   author: { id: 'kaisoryth', name: companion.name },
@@ -6682,6 +6814,23 @@ export default {
 
     if (request.method === 'OPTIONS') {
       return new Response(null, { headers: corsHeaders });
+    }
+
+    if (url.pathname === '/api/runner/kai/deliver' && request.method === 'POST') {
+      if (!isKaiHarnessAuthorized(request, env)) {
+        return Response.json({ error: 'Unauthorized' }, { status: 401, headers: { 'Cache-Control': 'no-store' } });
+      }
+      if (!isKaiDeliveryEnabled(env)) {
+        return Response.json({ error: 'Kai Discord delivery is disabled' }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+      }
+      const body = await request.clone().json().catch(() => null) as KaiHarnessDeliveryRequest | null;
+      const channelId = String(body?.channel_id || '').trim();
+      if (!/^\d+$/.test(channelId) || !isKaiHarnessDeliveryChannel(env, channelId)) {
+        return Response.json({ error: 'Channel is not approved for Kai harness delivery' }, { status: 403, headers: { 'Cache-Control': 'no-store' } });
+      }
+      const id = env.COMPANION_BOT.idFromName('default');
+      const stub = env.COMPANION_BOT.get(id);
+      return stub.fetch(new Request('https://internal/api/runner/kai/deliver', request));
     }
 
     // Health check
