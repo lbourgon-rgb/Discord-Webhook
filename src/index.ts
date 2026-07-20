@@ -3601,7 +3601,17 @@ export class CompanionBot extends McpAgent<Env> {
       }
       try {
         const channelId = await this.prepareKaiDmChannel(userId);
-        return Response.json({ ok: true, conversation_id: `discord-dm:${channelId}`, channel_id: channelId });
+        const state = this.ctx.storage.sql.exec(
+          `SELECT last_checked, last_message_id FROM discord_monitors
+           WHERE channel_id = ? AND added_by = 'KAI_DM_USER_IDS' LIMIT 1`,
+          channelId
+        ).toArray()[0] as Record<string, unknown> | undefined;
+        return Response.json({
+          ok: true,
+          conversation_id: `discord-dm:${channelId}`,
+          channel_id: channelId,
+          cursor_initialized: Number(state?.last_checked || 0) > 0,
+        });
       } catch (error) {
         return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 502 });
       }
