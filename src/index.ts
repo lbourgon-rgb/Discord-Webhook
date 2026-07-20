@@ -1349,7 +1349,7 @@ function splitMessage(content: string, maxLength: number = 2000): string[] {
 
 interface KaiHarnessDeliveryRequest {
   response_event_id: string;
-  wake_candidate_id: number;
+  wake_candidate_id: string;
   channel_id: string;
   reply_to_message_id?: string;
   content: string;
@@ -1357,7 +1357,7 @@ interface KaiHarnessDeliveryRequest {
 
 interface KaiHarnessDeliveryReceipt {
   response_event_id: string;
-  wake_candidate_id: number;
+  wake_candidate_id: string;
   channel_id: string;
   sent_message_ids: string[];
   next_chunk: number;
@@ -3532,9 +3532,9 @@ export class CompanionBot extends McpAgent<Env> {
       const responseEventId = String(body?.response_event_id || '').trim();
       const channelId = String(body?.channel_id || '').trim();
       const content = String(body?.content || '');
-      const candidateId = Number(body?.wake_candidate_id);
+      const candidateId = String(body?.wake_candidate_id || '').trim();
       const replyToMessageId = String(body?.reply_to_message_id || '').trim();
-      if (!responseEventId || !/^\d+$/.test(channelId) || !Number.isInteger(candidateId) || candidateId <= 0 || !content.trim()) {
+      if (!responseEventId || !candidateId || candidateId.length > 160 || !/^\d+$/.test(channelId) || !content.trim()) {
         return Response.json({ error: 'response_event_id, wake_candidate_id, channel_id, and content are required' }, { status: 400 });
       }
 

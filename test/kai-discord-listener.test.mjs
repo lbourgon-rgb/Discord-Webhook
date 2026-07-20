@@ -276,6 +276,8 @@ test('Kai harness delivery is authenticated, allowlisted, gated, and idempotent'
   assert.match(source, /enforce_nonce: true/);
   assert.match(source, /allowed_mentions: \{ parse: \[\] \}/);
   assert.match(source, /existing\?\.completed/);
+  assert.match(source, /wake_candidate_id: string/);
+  assert.doesNotMatch(source, /Number\(body\?\.wake_candidate_id\)/);
 });
 
 test('Kai fallback delegates before generation and fences Continuity before Discord delivery', () => {
