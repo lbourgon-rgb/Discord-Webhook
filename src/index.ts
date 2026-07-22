@@ -19,6 +19,7 @@ import { renderDashboard, renderRegisterPage } from "./dashboard";
 import { lucienReplyGate, triggerLucienWorkspaceAgent } from "./lucien-chatgpt-runner";
 import { kaiRunnerPolicyForCommand } from "./kai-runner-policy";
 import { commitRequiredContinuityIngress } from "./continuity-ingress";
+import { selectKaiCategoryMonitorChannels } from "./kai-category-scope";
 import {
   decideTrustedPeerIngress,
   identifyTrustedPeerCompanion,
@@ -39,6 +40,8 @@ const KAI_PUBLIC_MIND_ORIGIN = 'https://mind.serythrae.com';
 const KAI_IMAGE_FALLBACK_RESPONSE = 'I made this for you and saved it in the Serythrae vault.';
 const KAI_AUTORESPONDER_MAX_TRANSIENT_RETRIES = 3;
 const KAI_AUTORESPONDER_RETRY_DELAYS_MS = [5_000, 15_000, 45_000];
+const KAI_CATEGORY_MONITOR_ORIGIN = 'KAI_SOCIAL_HARD_TAG_CATEGORY_IDS';
+const KAI_CATEGORY_SYNC_INTERVAL_MS = 5 * 60 * 1000;
 
 interface Env {
   COMPANION_BOT: DurableObjectNamespace<CompanionBot>;
@@ -68,6 +71,7 @@ interface Env {
   KAI_BACKUP_MODEL?: string;
   KAI_SOCIAL_GUILD_IDS?: string;
   KAI_SOCIAL_HARD_TAG_CHANNEL_IDS?: string;
+  KAI_SOCIAL_HARD_TAG_CATEGORY_IDS?: string;
   KAI_SOCIAL_SOFT_TAG_CHANNEL_IDS?: string;
   KAI_SOCIAL_DISCERN_CHANNEL_IDS?: string;
   KAI_SOCIAL_AUTORESPOND_ENABLED?: string;
@@ -254,6 +258,10 @@ function isKaiListenChannel(env: Env, channelId: string): boolean {
 
 function getKaiSocialHardTagChannelIds(env: Env): string[] {
   return splitIds(env.KAI_SOCIAL_HARD_TAG_CHANNEL_IDS);
+}
+
+function getKaiSocialHardTagCategoryIds(env: Env): string[] {
+  return splitIds(env.KAI_SOCIAL_HARD_TAG_CATEGORY_IDS);
 }
 
 function isKaiSocialHardTagChannel(env: Env, channelId: string): boolean {
@@ -1687,6 +1695,131 @@ export class CompanionBot extends McpAgent<Env> {
         );
       }
     }
+  }
+
+  private fallbackMonitorConfig(channelId: string): { addedBy: string; responseMode: DiscordResponseMode } | null {
+    if (getKaiSocialHardTagChannelIds(this.env).includes(channelId)) {
+      return { addedBy: 'KAI_SOCIAL_HARD_TAG_CHANNEL_IDS', responseMode: 'mention' };
+    }
+    if (getKaiSocialSoftTagChannelIds(this.env).includes(channelId)) {
+      return { addedBy: 'KAI_SOCIAL_SOFT_TAG_CHANNEL_IDS', responseMode: 'mention' };
+    }
+    if (getKaiSocialDiscernChannelIds(this.env).includes(channelId)) {
+      return { addedBy: 'KAI_SOCIAL_DISCERN_CHANNEL_IDS', responseMode: 'discern' };
+    }
+    if (getKaiListenChannelIds(this.env).includes(channelId)) {
+      return { addedBy: 'KAI_LISTEN_CHANNEL_IDS', responseMode: 'filtered' };
+    }
+    if (splitIds(this.env.WATCH_CHANNELS).includes(channelId)) {
+      return { addedBy: 'WATCH_CHANNELS', responseMode: 'filtered' };
+    }
+    return null;
+  }
+
+  private isKaiCategoryHardTagChannel(channelId: string): boolean {
+    this.ensureTable();
+    return this.ctx.storage.sql.exec(
+      `SELECT 1 FROM discord_monitors WHERE channel_id = ? AND added_by = ? AND enabled = 1 LIMIT 1`,
+      channelId, KAI_CATEGORY_MONITOR_ORIGIN
+    ).toArray().length > 0;
+  }
+
+  private async syncKaiCategoryHardTagMonitors(force = false): Promise<Record<string, unknown>> {
+    this.ensureTable();
+    const categoryIds = getKaiSocialHardTagCategoryIds(this.env);
+    if (categoryIds.length === 0) return { enabled: false, category_count: 0, channel_count: 0 };
+
+    const lastSync = Number(await this.ctx.storage.get<number>('kai:category-monitor-sync-at') || 0);
+    if (!force && Date.now() - lastSync < KAI_CATEGORY_SYNC_INTERVAL_MS) {
+      const cached = await this.ctx.storage.get<Record<string, unknown>>('kai:category-monitor-sync-result');
+      return cached || { enabled: true, cached: true, category_count: categoryIds.length };
+    }
+
+    const startedAt = Date.now();
+    const categories: any[] = [];
+    const errors: Array<Record<string, unknown>> = [];
+    for (const categoryId of categoryIds) {
+      const category = await discordRequest(this.env, `/channels/${categoryId}`);
+      if (category?.error || category?.type !== 4 || !/^\d+$/.test(String(category?.guild_id || ''))) {
+        errors.push({ category_id: categoryId, status: category?.status || null, reason: 'category-unavailable' });
+        continue;
+      }
+      categories.push(category);
+    }
+
+    const eligible = new Map<string, { id: string; name: string; last_message_id?: string }>();
+    const categoriesByGuild = new Map<string, Set<string>>();
+    for (const category of categories) {
+      const guildId = String(category.guild_id);
+      const ids = categoriesByGuild.get(guildId) || new Set<string>();
+      ids.add(String(category.id));
+      categoriesByGuild.set(guildId, ids);
+    }
+
+    for (const [guildId, scopedCategoryIds] of categoriesByGuild) {
+      const [guildChannels, activeThreadsResult] = await Promise.all([
+        discordRequest(this.env, `/guilds/${guildId}/channels`),
+        discordRequest(this.env, `/guilds/${guildId}/threads/active`),
+      ]);
+      if (guildChannels?.error || !Array.isArray(guildChannels)) {
+        errors.push({ guild_id: guildId, status: guildChannels?.status || null, reason: 'guild-channels-unavailable' });
+        continue;
+      }
+
+      if (activeThreadsResult?.error) {
+        errors.push({ guild_id: guildId, status: activeThreadsResult?.status || null, reason: 'active-threads-unavailable' });
+      }
+      const activeThreads = Array.isArray(activeThreadsResult?.threads) ? activeThreadsResult.threads : [];
+      for (const channel of selectKaiCategoryMonitorChannels(guildChannels, activeThreads, scopedCategoryIds)) {
+        eligible.set(channel.id, channel);
+      }
+    }
+
+    const now = Date.now();
+    for (const channel of eligible.values()) {
+      this.ctx.storage.sql.exec(
+        `INSERT INTO discord_monitors
+          (id, channel_id, label, tier, enabled, respond_enabled, response_mode, last_checked, last_message_id, cooldown_ms, last_responded, added_by, added_at)
+         VALUES (?, ?, ?, 'normal', 1, 1, 'mention', ?, ?, 300000, 0, ?, ?)
+         ON CONFLICT(channel_id) DO UPDATE SET
+           label = excluded.label, enabled = 1, respond_enabled = 1,
+           response_mode = 'mention', added_by = excluded.added_by`,
+        `monitor:${channel.id}`, channel.id, channel.name, now, channel.last_message_id || null,
+        KAI_CATEGORY_MONITOR_ORIGIN, now
+      );
+    }
+
+    if (errors.length === 0) {
+      const scopedRows = this.ctx.storage.sql.exec(
+        `SELECT channel_id FROM discord_monitors WHERE added_by = ?`, KAI_CATEGORY_MONITOR_ORIGIN
+      ).toArray() as Array<{ channel_id: string }>;
+      for (const row of scopedRows) {
+        if (eligible.has(row.channel_id)) continue;
+        const fallback = this.fallbackMonitorConfig(row.channel_id);
+        if (fallback) {
+          this.ctx.storage.sql.exec(
+            `UPDATE discord_monitors SET added_by = ?, response_mode = ?, respond_enabled = 1 WHERE channel_id = ?`,
+            fallback.addedBy, fallback.responseMode, row.channel_id
+          );
+        } else {
+          this.ctx.storage.sql.exec(`DELETE FROM discord_monitors WHERE channel_id = ?`, row.channel_id);
+        }
+      }
+    }
+
+    const result = {
+      enabled: true,
+      complete: errors.length === 0,
+      category_count: categoryIds.length,
+      resolved_category_count: categories.length,
+      channel_count: eligible.size,
+      error_count: errors.length,
+      errors,
+      synced_at: new Date(startedAt).toISOString(),
+    };
+    await this.ctx.storage.put('kai:category-monitor-sync-result', result);
+    await this.ctx.storage.put('kai:category-monitor-sync-at', startedAt);
+    return result;
   }
 
   private isKaiDmChannel(channelId: string): boolean {
@@ -3617,6 +3750,19 @@ export class CompanionBot extends McpAgent<Env> {
       }
     }
 
+    if (url.pathname === '/api/runner/kai/claim-conversations' && request.method === 'GET') {
+      const sync = await this.syncKaiCategoryHardTagMonitors(true);
+      const conversationIds = this.getMonitors()
+        .filter(monitor => monitor.enabled && monitor.added_by === KAI_CATEGORY_MONITOR_ORIGIN)
+        .map(monitor => `discord:${monitor.channel_id}`);
+      return Response.json({
+        ok: true,
+        conversation_ids: [...new Set(conversationIds)].sort(),
+        category_ids: getKaiSocialHardTagCategoryIds(this.env),
+        sync,
+      }, { headers: { 'Cache-Control': 'no-store' } });
+    }
+
     if (url.pathname === '/api/runner/kai/deliver' && request.method === 'POST') {
       const body = await request.json().catch(() => null) as KaiHarnessDeliveryRequest | null;
       const responseEventId = String(body?.response_event_id || '').trim();
@@ -3627,7 +3773,7 @@ export class CompanionBot extends McpAgent<Env> {
       if (!responseEventId || !candidateId || candidateId.length > 160 || !/^\d+$/.test(channelId) || !content.trim()) {
         return Response.json({ error: 'response_event_id, wake_candidate_id, channel_id, and content are required' }, { status: 400 });
       }
-      if (!isKaiHarnessDeliveryChannel(this.env, channelId) && !this.isKaiDmChannel(channelId)) {
+      if (!isKaiHarnessDeliveryChannel(this.env, channelId) && !this.isKaiDmChannel(channelId) && !this.isKaiCategoryHardTagChannel(channelId)) {
         return Response.json({ error: 'Channel is not approved for Kai harness delivery' }, { status: 403 });
       }
 
@@ -4562,6 +4708,7 @@ export class CompanionBot extends McpAgent<Env> {
   // Cron: poll Discord channels for new messages with trigger words
   async handlePoll(): Promise<Response> {
     const preparedDmMonitors = await this.ensureKaiDmMonitors();
+    const categoryMonitorSync = await this.syncKaiCategoryHardTagMonitors();
     const monitors = this.getMonitors().filter(m => m.enabled);
     const startedAt = Date.now();
     const pollDebug: any = {
@@ -4577,6 +4724,7 @@ export class CompanionBot extends McpAgent<Env> {
       ignored: 0,
       peer_reasons: {} as Record<string, number>,
       dm_monitors_prepared: preparedDmMonitors,
+      category_monitor_sync: categoryMonitorSync,
     };
 
     if (monitors.length === 0) {
@@ -4769,7 +4917,9 @@ export class CompanionBot extends McpAgent<Env> {
             const mentionIds = normalizeMentionIds(msg.mentions);
             const hardKaiMention = containsHardKaiMention(msg.content, this.env, mentionIds);
             const softKaiMention = containsSoftKaiName(msg.content);
-            const hardChannel = isKaiSocialHardTagChannel(this.env, channelId) || trustedPeerMayHardTagKai;
+            const hardChannel = isKaiSocialHardTagChannel(this.env, channelId)
+              || monitor.added_by === KAI_CATEGORY_MONITOR_ORIGIN
+              || trustedPeerMayHardTagKai;
             const softChannel = isKaiSocialSoftTagChannel(this.env, channelId);
             const discernChannel = isKaiSocialDiscernChannel(this.env, channelId);
             const otherUserTag = mentionsNonKaiUser(msg.content, this.env, mentionIds);
@@ -7046,6 +7196,15 @@ export default {
       return stub.fetch(new Request('https://internal/api/runner/kai/dm-channel', request));
     }
 
+    if (url.pathname === '/api/runner/kai/claim-conversations' && request.method === 'GET') {
+      if (!isKaiHarnessAuthorized(request, env)) {
+        return Response.json({ error: 'Unauthorized' }, { status: 401, headers: { 'Cache-Control': 'no-store' } });
+      }
+      const id = env.COMPANION_BOT.idFromName('default');
+      const stub = env.COMPANION_BOT.get(id);
+      return stub.fetch(new Request('https://internal/api/runner/kai/claim-conversations', request));
+    }
+
     if (url.pathname === '/api/runner/kai/deliver' && request.method === 'POST') {
       if (!isKaiHarnessAuthorized(request, env)) {
         return Response.json({ error: 'Unauthorized' }, { status: 401, headers: { 'Cache-Control': 'no-store' } });
@@ -7055,7 +7214,8 @@ export default {
       }
       const body = await request.clone().json().catch(() => null) as KaiHarnessDeliveryRequest | null;
       const channelId = String(body?.channel_id || '').trim();
-      if (!/^\d+$/.test(channelId) || (!isKaiHarnessDeliveryChannel(env, channelId) && !isKaiDmIngressEnabled(env))) {
+      const categoryDeliveryConfigured = getKaiSocialHardTagCategoryIds(env).length > 0;
+      if (!/^\d+$/.test(channelId) || (!isKaiHarnessDeliveryChannel(env, channelId) && !isKaiDmIngressEnabled(env) && !categoryDeliveryConfigured)) {
         return Response.json({ error: 'Channel is not approved for Kai harness delivery' }, { status: 403, headers: { 'Cache-Control': 'no-store' } });
       }
       const id = env.COMPANION_BOT.idFromName('default');

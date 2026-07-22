@@ -159,7 +159,7 @@ test('Axiom bot may hard-tag Kai for live supervised smoke tests without opening
   assert.match(source, /isLegacyKaiPeerHardTagActor\(normalizeDiscordCompanionId\(peerAuthorCompanion\.id\)\)/);
   assert.match(source, /peerTargetModes\.get\('kai'\) === 'hard_mention'/);
   assert.match(source, /peerTargetModes\.has\('kai'\)[\s\S]{0,80}&& !peerTargetModes\.has\('axiom'\)/);
-  assert.match(source, /const hardChannel = isKaiSocialHardTagChannel\(this\.env, channelId\) \|\| trustedPeerMayHardTagKai/);
+  assert.match(source, /const hardChannel = isKaiSocialHardTagChannel\(this\.env, channelId\)[\s\S]{0,180}trustedPeerMayHardTagKai/);
   assert.match(source, /const hardAllowed = hardKaiMention && hardChannel/);
   assert.match(source, /normalizeDiscordCompanionId\(companion\.id\) === 'axiom'[\s\S]{0,100}peerTargetModes\.has\('axiom'\)/);
 });
@@ -167,6 +167,23 @@ test('Axiom bot may hard-tag Kai for live supervised smoke tests without opening
 test('Kai social hard-tag bootstrap upgrades existing watch-channel monitor rows', () => {
   assert.match(source, /config\.addedBy\.startsWith\('KAI_SOCIAL_'\)/);
   assert.match(source, /UPDATE discord_monitors SET response_mode = \?, respond_enabled = 1, added_by = \? WHERE channel_id = \?/);
+});
+
+test('Kai category hard tags discover current channels and active forum threads without replaying history', () => {
+  assert.match(source, /KAI_SOCIAL_HARD_TAG_CATEGORY_IDS\?: string/);
+  assert.match(source, /private async syncKaiCategoryHardTagMonitors\(force = false\)/);
+  assert.match(source, /\/guilds\/\$\{guildId\}\/channels/);
+  assert.match(source, /\/guilds\/\$\{guildId\}\/threads\/active/);
+  assert.match(source, /selectKaiCategoryMonitorChannels\(guildChannels, activeThreads, scopedCategoryIds\)/);
+  assert.match(source, /monitor\.added_by === KAI_CATEGORY_MONITOR_ORIGIN/);
+});
+
+test('Kai harness claim and delivery fences admit only live category-scoped monitor rows', () => {
+  assert.match(source, /url\.pathname === '\/api\/runner\/kai\/claim-conversations'/);
+  assert.match(source, /isKaiHarnessAuthorized\(request, env\)/);
+  assert.match(source, /monitor\.added_by === KAI_CATEGORY_MONITOR_ORIGIN/);
+  assert.match(source, /this\.isKaiCategoryHardTagChannel\(channelId\)/);
+  assert.match(source, /categoryDeliveryConfigured/);
 });
 
 test('Kai runner envelope carries Discord engagement policy context', () => {
