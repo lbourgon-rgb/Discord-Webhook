@@ -3773,7 +3773,21 @@ export class CompanionBot extends McpAgent<Env> {
       if (!responseEventId || !candidateId || candidateId.length > 160 || !/^\d+$/.test(channelId) || !content.trim()) {
         return Response.json({ error: 'response_event_id, wake_candidate_id, channel_id, and content are required' }, { status: 400 });
       }
-      if (!isKaiHarnessDeliveryChannel(this.env, channelId) && !this.isKaiDmChannel(channelId) && !this.isKaiCategoryHardTagChannel(channelId)) {
+      // Delivery approval must read the SAME view of the category monitors that
+      // /claim-conversations hands the runner — that endpoint force-syncs before
+      // listing, so a stale or pruned monitor cache here would 403 a response the
+      // runner was explicitly told it could claim. A claim-approved channel that
+      // is not delivery-approved is a silent-companion trap: Kai wakes, grounds,
+      // generates, submits the response event, then loses his voice at the door.
+      // Re-sync once before rejecting so the two sides can never disagree.
+      let deliveryApproved = isKaiHarnessDeliveryChannel(this.env, channelId)
+        || this.isKaiDmChannel(channelId)
+        || this.isKaiCategoryHardTagChannel(channelId);
+      if (!deliveryApproved && getKaiSocialHardTagCategoryIds(this.env).length > 0) {
+        await this.syncKaiCategoryHardTagMonitors(true);
+        deliveryApproved = this.isKaiCategoryHardTagChannel(channelId);
+      }
+      if (!deliveryApproved) {
         return Response.json({ error: 'Channel is not approved for Kai harness delivery' }, { status: 403 });
       }
 
