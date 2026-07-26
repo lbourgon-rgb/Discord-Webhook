@@ -464,8 +464,14 @@ test('Kai DM preparation and delivery remain harness-authenticated and allowlist
   assert.match(source, /url\.pathname === '\/api\/runner\/kai\/dm-channel'/);
   assert.match(source, /isKaiHarnessAuthorized\(request, env\)/);
   assert.match(source, /getKaiDmUserIds\(env\)\.includes\(userId\)/);
-  assert.match(source, /!isKaiHarnessDeliveryChannel\(this\.env, channelId\) && !this\.isKaiDmChannel\(channelId\)/);
-  assert.match(source, /Channel is not approved for Kai harness delivery/);
+  // Delivery approval is computed from the explicit allowlist, DM channels, and
+  // the category monitors — then re-synced once before rejecting, so it can
+  // never disagree with the claim scope /claim-conversations force-syncs.
+  assert.match(source, /let deliveryApproved = isKaiHarnessDeliveryChannel\(this\.env, channelId\)/);
+  assert.match(source, /\|\| this\.isKaiDmChannel\(channelId\)/);
+  assert.match(source, /\|\| this\.isKaiCategoryHardTagChannel\(channelId\)/);
+  assert.match(source, /if \(!deliveryApproved && getKaiSocialHardTagCategoryIds\(this\.env\)\.length > 0\) \{[\s\S]{0,200}syncKaiCategoryHardTagMonitors\(true\)/);
+  assert.match(source, /if \(!deliveryApproved\) \{[\s\S]{0,160}Channel is not approved for Kai harness delivery/);
   assert.match(source, /DELETE FROM pending_commands[\s\S]{0,180}message_id = \?/);
   assert.match(source, /'kai:last_harness_delivery'/);
 });
