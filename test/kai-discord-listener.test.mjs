@@ -294,6 +294,12 @@ test('Kai harness delivery is authenticated, allowlisted, gated, and idempotent'
   assert.match(source, /allowed_mentions: \{ parse: \[\] \}/);
   assert.match(source, /existing\?\.completed/);
   assert.match(source, /wake_candidate_id: string/);
+  assert.match(source, /generated_images\?: unknown/);
+  assert.match(source, /const generatedImages = kaiGeneratedDiscordImages/);
+  assert.match(source, /content or generated_images are required/);
+  assert.match(source, /sent_image_message_ids\?: string\[\]/);
+  assert.match(source, /images_completed\?: boolean/);
+  assert.match(source, /sendKaiGeneratedImages\([\s\S]{0,220}responseEventId/);
   assert.doesNotMatch(source, /Number\(body\?\.wake_candidate_id\)/);
 });
 
@@ -352,6 +358,7 @@ test('Kai generated images are normalized, delivered to Discord, and logged with
   assert.match(source, /const sourceUrl = absoluteKaiImageUrl\(image\.url\)/);
   assert.match(source, /async function sendKaiGeneratedImages/);
   assert.match(source, /embeds: group/);
+  assert.match(source, /kaiHarnessDiscordNonce\(`\$\{harnessNonceSeed\}:image`, index\)/);
   assert.match(source, /Discord image delivery error/);
   assert.match(source, /const generatedImages = kaiGeneratedDiscordImages\(runnerResult\)/);
   assert.match(source, /const deliveryResponse = generatedResponse \|\| \(generatedImages\.length \? KAI_IMAGE_FALLBACK_RESPONSE : ''\)/);

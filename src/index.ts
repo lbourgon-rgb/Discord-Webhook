@@ -1272,10 +1272,11 @@ function kaiGeneratedImageMetadata(images: KaiGeneratedDiscordImage[], sentMessa
 
 async function sendKaiGeneratedImages(
   env: Env,
-  command: PendingCommand,
+  command: Pick<PendingCommand, 'channel_id'>,
   companion: Companion,
   images: KaiGeneratedDiscordImage[],
-  targetWebhookUrl?: string | null
+  targetWebhookUrl?: string | null,
+  harnessNonceSeed?: string,
 ): Promise<{ sentMessageIds: string[]; sentWebhookUrl?: string }> {
   if (!images.length) return { sentMessageIds: [] };
   const sentMessageIds: string[] = [];
@@ -1303,10 +1304,19 @@ async function sendKaiGeneratedImages(
     return { sentMessageIds, sentWebhookUrl: targetWebhookUrl };
   }
 
-  for (const group of embedGroups) {
+  for (let index = 0; index < embedGroups.length; index += 1) {
+    const group = embedGroups[index];
     const result = await discordRequest(env, `/channels/${command.channel_id}/messages`, {
       method: 'POST',
-      body: JSON.stringify({ content: caption, embeds: group }),
+      body: JSON.stringify({
+        content: caption,
+        embeds: group,
+        ...(harnessNonceSeed ? {
+          nonce: await kaiHarnessDiscordNonce(`${harnessNonceSeed}:image`, index),
+          enforce_nonce: true,
+          allowed_mentions: { parse: [] },
+        } : {}),
+      }),
     });
     if (result.error) throw new Error(`Discord image delivery error: ${JSON.stringify(result)}`);
     sentMessageIds.push(result.id);
@@ -1373,6 +1383,7 @@ interface KaiHarnessDeliveryRequest {
   channel_id: string;
   reply_to_message_id?: string;
   content: string;
+  generated_images?: unknown;
 }
 
 interface KaiHarnessDeliveryReceipt {
@@ -1380,7 +1391,9 @@ interface KaiHarnessDeliveryReceipt {
   wake_candidate_id: string;
   channel_id: string;
   sent_message_ids: string[];
+  sent_image_message_ids?: string[];
   next_chunk: number;
+  images_completed?: boolean;
   completed: boolean;
 }
 
@@ -3770,8 +3783,11 @@ export class CompanionBot extends McpAgent<Env> {
       const content = String(body?.content || '');
       const candidateId = String(body?.wake_candidate_id || '').trim();
       const replyToMessageId = String(body?.reply_to_message_id || '').trim();
-      if (!responseEventId || !candidateId || candidateId.length > 160 || !/^\d+$/.test(channelId) || !content.trim()) {
-        return Response.json({ error: 'response_event_id, wake_candidate_id, channel_id, and content are required' }, { status: 400 });
+      const generatedImages = kaiGeneratedDiscordImages({
+        image_generation: { images: body?.generated_images },
+      });
+      if (!responseEventId || !candidateId || candidateId.length > 160 || !/^\d+$/.test(channelId) || (!content.trim() && !generatedImages.length)) {
+        return Response.json({ error: 'response_event_id, wake_candidate_id, channel_id, and content or generated_images are required' }, { status: 400 });
       }
       // Delivery approval must read the SAME view of the category monitors that
       // /claim-conversations hands the runner — that endpoint force-syncs before
@@ -3804,13 +3820,15 @@ export class CompanionBot extends McpAgent<Env> {
         return Response.json({ ok: true, replayed: true, ...existing });
       }
 
-      const chunks = splitMessage(content);
+      const chunks = content.trim() ? splitMessage(content) : [];
       const receipt: KaiHarnessDeliveryReceipt = existing || {
         response_event_id: responseEventId,
         wake_candidate_id: candidateId,
         channel_id: channelId,
         sent_message_ids: [],
+        sent_image_message_ids: [],
         next_chunk: 0,
+        images_completed: false,
         completed: false,
       };
       if (receipt.wake_candidate_id !== candidateId || receipt.channel_id !== channelId) {
@@ -3839,6 +3857,25 @@ export class CompanionBot extends McpAgent<Env> {
         await this.ctx.storage.put(receiptKey, receipt);
       }
 
+      receipt.sent_image_message_ids ||= [];
+      if (!receipt.images_completed) {
+        if (generatedImages.length) {
+          const companion = this.getCompanionById('kai');
+          if (!companion) return Response.json({ error: 'Kai companion delivery profile is unavailable' }, { status: 503 });
+          const imageDelivery = await sendKaiGeneratedImages(
+            this.env,
+            { channel_id: channelId },
+            companion,
+            generatedImages,
+            null,
+            responseEventId,
+          );
+          receipt.sent_image_message_ids = imageDelivery.sentMessageIds;
+        }
+        receipt.images_completed = true;
+        await this.ctx.storage.put(receiptKey, receipt);
+      }
+
       receipt.completed = true;
       await this.ctx.storage.put(receiptKey, receipt);
       if (/^\d+$/.test(replyToMessageId)) {
@@ -3853,7 +3890,10 @@ export class CompanionBot extends McpAgent<Env> {
         wake_candidate_id: candidateId,
         channel_id: channelId,
         surface: this.isKaiDmChannel(channelId) ? 'discord-dm' : 'discord',
-        sent_message_ids: receipt.sent_message_ids,
+        sent_message_ids: [...receipt.sent_message_ids, ...(receipt.sent_image_message_ids || [])],
+        sent_text_message_ids: receipt.sent_message_ids,
+        sent_image_message_ids: receipt.sent_image_message_ids || [],
+        generated_images: kaiGeneratedImageMetadata(generatedImages, receipt.sent_image_message_ids || []),
         completed_at: new Date().toISOString(),
       });
       return Response.json({ ok: true, replayed: false, ...receipt });
