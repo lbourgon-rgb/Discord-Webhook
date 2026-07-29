@@ -351,11 +351,14 @@ test('Kai status exposes pending retry diagnostics and latest failure', () => {
 test('Kai generated images are normalized, delivered to Discord, and logged with Continuity', () => {
   assert.match(source, /const KAI_PUBLIC_MIND_ORIGIN = 'https:\/\/mind\.serythrae\.com'/);
   assert.match(source, /function absoluteKaiImageUrl\(value: unknown\): string \| null/);
-  assert.match(source, /url\.startsWith\('\/img\/'\)\) return `\$\{KAI_PUBLIC_MIND_ORIGIN\}\$\{url\}`/);
+  assert.match(source, /url\.origin !== KAI_PUBLIC_MIND_ORIGIN/);
+  assert.match(source, /!url\.pathname\.startsWith\('\/img\/generated\/kai\/'\)/);
   assert.match(source, /function kaiGeneratedDiscordImages\(runnerResult: any\): KaiGeneratedDiscordImage\[\]/);
   assert.match(source, /runnerResult\?\.image_generation\?\.images/);
+  assert.match(source, /\.slice\(0, 4\)/);
   assert.match(source, /const storedUrl = absoluteKaiImageUrl\(image\.stored_url\)/);
-  assert.match(source, /const sourceUrl = absoluteKaiImageUrl\(image\.url\)/);
+  assert.match(source, /if \(!storedUrl\) return null/);
+  assert.doesNotMatch(source, /const sourceUrl = absoluteKaiImageUrl\(image\.url\)/);
   assert.match(source, /async function sendKaiGeneratedImages/);
   assert.match(source, /embeds: group/);
   assert.match(source, /kaiHarnessDiscordNonce\(`\$\{harnessNonceSeed\}:image`, index\)/);

@@ -1215,35 +1215,41 @@ interface KaiGeneratedDiscordImage {
   url: string;
   key?: string;
   stored_url?: string;
-  source_url?: string;
   content_type?: string;
 }
 
 function absoluteKaiImageUrl(value: unknown): string | null {
   if (typeof value !== 'string' || !value.trim()) return null;
-  const url = value.trim();
-  if (url.startsWith('/img/')) return `${KAI_PUBLIC_MIND_ORIGIN}${url}`;
-  if (/^https?:\/\//i.test(url)) return url;
-  return null;
+  const raw = value.trim();
+  try {
+    const url = new URL(raw, KAI_PUBLIC_MIND_ORIGIN);
+    if (url.protocol !== 'https:'
+      || url.origin !== KAI_PUBLIC_MIND_ORIGIN
+      || url.username
+      || url.password
+      || url.port
+      || !url.pathname.startsWith('/img/generated/kai/')) return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
 }
 
 function kaiGeneratedDiscordImages(runnerResult: any): KaiGeneratedDiscordImage[] {
   const images = runnerResult?.image_generation?.images;
   if (!Array.isArray(images)) return [];
   return images
+    .slice(0, 4)
     .map((image: any, index: number): KaiGeneratedDiscordImage | null => {
       if (!image || typeof image !== 'object' || Array.isArray(image)) return null;
       const storedUrl = absoluteKaiImageUrl(image.stored_url);
-      const sourceUrl = absoluteKaiImageUrl(image.url);
-      const url = storedUrl || sourceUrl;
-      if (!url) return null;
+      if (!storedUrl) return null;
       return {
         index: typeof image.index === 'number' ? image.index : index,
-        url,
-        key: typeof image.r2_key === 'string' ? image.r2_key : undefined,
-        stored_url: typeof image.stored_url === 'string' ? image.stored_url : undefined,
-        source_url: typeof image.url === 'string' ? image.url : undefined,
-        content_type: typeof image.mime_type === 'string' ? image.mime_type : undefined,
+        url: storedUrl,
+        key: typeof image.r2_key === 'string' ? image.r2_key.slice(0, 512) : undefined,
+        stored_url: storedUrl,
+        content_type: typeof image.mime_type === 'string' ? image.mime_type.slice(0, 80) : undefined,
       };
     })
     .filter((image): image is KaiGeneratedDiscordImage => Boolean(image));
@@ -1264,7 +1270,6 @@ function kaiGeneratedImageMetadata(images: KaiGeneratedDiscordImage[], sentMessa
     url: image.url,
     r2_key: image.key || null,
     stored_url: image.stored_url || null,
-    source_url: image.source_url || null,
     content_type: image.content_type || null,
     discord_message_id: sentMessageIds[index] || null,
   }));
