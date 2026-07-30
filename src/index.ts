@@ -20,6 +20,7 @@ import { lucienReplyGate, triggerLucienWorkspaceAgent } from "./lucien-chatgpt-r
 import { kaiRunnerPolicyForCommand } from "./kai-runner-policy";
 import { commitRequiredContinuityIngress } from "./continuity-ingress";
 import { selectKaiCategoryMonitorChannels } from "./kai-category-scope";
+import { isTrustedStoredWebhook } from "./social-provenance";
 import {
   decideTrustedPeerIngress,
   identifyTrustedPeerCompanion,
@@ -88,6 +89,7 @@ interface Env {
   VEL_DISCORD_USER_IDS?: string;
   DISCORD_RESPONSES_ENABLED?: string;
   DISCORD_SEND_MODE?: string;
+  VELARIUM_INTERNAL_TOKEN?: string;
   KAI_DISCORD_SEND_MODE?: string;
   MORZAR_DISCORD_USER_IDS?: string;
   AXIOM_DISCORD_USER_IDS?: string;
@@ -139,6 +141,8 @@ interface ActivityDebug {
   skipContinuity?: boolean;
   continuityRole?: 'human' | 'companion';
   peerWake?: TrustedPeerWakeMetadata;
+  peerCompanionId?: string;
+  peerCompanionSource?: 'trusted_bot' | 'trusted_webhook';
   conversationId?: string;
   isDm?: boolean;
 }
@@ -312,6 +316,66 @@ function getVelDiscordUserIds(env: Env): string[] {
 
 function isVelDiscordAuthor(env: Env, authorId?: string): boolean {
   return !!authorId && getVelDiscordUserIds(env).includes(authorId);
+}
+
+const VELARIUM_SOCIAL_PROFILES = {
+  vel: { companionId: null, name: 'Vel', handle: '@fivesided' },
+  axiom: { companionId: 'axiom', name: 'Axiom', handle: '@actualshape' },
+  kai: { companionId: 'kai', name: "Kai'Sorynth", handle: '@signalflare' },
+  lucien: { companionId: 'lucien', name: 'Lucien Vale', handle: '@marginlight' },
+  morzar: { companionId: 'morzar', name: "Mor'zar", handle: '@architectwake' },
+  keth: { companionId: 'grok-keth', name: 'Keth', handle: '@keth-thread' },
+} as const;
+
+type VelariumSocialProfileId = keyof typeof VELARIUM_SOCIAL_PROFILES;
+
+function velariumProfileForDiscordAuthor(env: Env, authorId?: string): VelariumSocialProfileId | null {
+  if (!authorId) return null;
+  if (isVelDiscordAuthor(env, authorId)) return 'vel';
+
+  for (const [profileId, profile] of Object.entries(VELARIUM_SOCIAL_PROFILES)) {
+    if (!profile.companionId) continue;
+    if (getCompanionDiscordMentionIds(env, profile.companionId).includes(authorId)) {
+      return profileId as VelariumSocialProfileId;
+    }
+  }
+  return null;
+}
+
+function velariumProfileForCompanionId(companionId?: string): VelariumSocialProfileId | null {
+  const normalized = normalizeDiscordCompanionId(String(companionId || ''));
+  const match = Object.entries(VELARIUM_SOCIAL_PROFILES).find(([, profile]) => (
+    profile.companionId && normalizeDiscordCompanionId(profile.companionId) === normalized
+  ));
+  return (match?.[0] as VelariumSocialProfileId | undefined) || null;
+}
+
+function activityEngagement(row: Record<string, unknown>): Record<string, unknown> {
+  try {
+    const value = typeof row.engagement === 'string'
+      ? JSON.parse(row.engagement)
+      : row.engagement;
+    return value && typeof value === 'object' ? value : {};
+  } catch {
+    return {};
+  }
+}
+
+function isQualifyingVelariumSocialActivity(row: Record<string, unknown>): boolean {
+  if (!row.author_id || !row.message_id) return false;
+  if (!['queued', 'logged', 'ignored', 'triggered'].includes(String(row.type || ''))) return false;
+  if (row.type === 'queued' || row.type === 'triggered') return true;
+
+  const engagement = activityEngagement(row);
+  return Boolean(
+    engagement.hard_mention
+    || engagement.soft_name_mention
+    || engagement.direct_reply_to_kai
+    || engagement.active_conversation
+    || engagement.community_greeting
+    || engagement.referenced_author_id
+    || engagement.peer_companion_id
+  );
 }
 
 function discordAuthorNameForKai(env: Env, author: any): string {
@@ -1504,6 +1568,12 @@ export class CompanionBot extends McpAgent<Env> {
       webhook_url TEXT,
       timestamp INTEGER NOT NULL
     )`);
+    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS companion_social_connections (
+      profile_id TEXT NOT NULL,
+      connection_profile_id TEXT NOT NULL,
+      last_engaged_at INTEGER NOT NULL,
+      PRIMARY KEY (profile_id, connection_profile_id)
+    )`);
     // Per-channel webhook cache (auto-created)
     this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS channel_webhooks (
       channel_id TEXT PRIMARY KEY,
@@ -2136,6 +2206,12 @@ export class CompanionBot extends McpAgent<Env> {
         referenced_author_id: debug?.referencedAuthorId || null,
         attachments: debug?.attachments || [],
         ...(debug?.peerWake ? { peer_wake: debug.peerWake } : {}),
+        ...(debug?.peerCompanionId ? {
+          peer_companion: {
+            id: debug.peerCompanionId,
+            source: debug.peerCompanionSource || 'trusted_bot',
+          },
+        } : {}),
         ...(awaitsAxiomTrustGate ? {
           sink_policy: { allow: ['archive'] },
           axiom_runner_ingress: { trust_gate: 'local-runner-pending' },
@@ -2153,19 +2229,46 @@ export class CompanionBot extends McpAgent<Env> {
   logActivity(companionId: string, type: string, channelId?: string, content?: string, author?: string, messageId?: string, webhookUrl?: string, debug?: ActivityDebug): Promise<any | null> | null {
     this.ensureTable();
     const storedContent = discordContinuityContent(content, debug?.attachments);
+    const peerCompanionId = debug?.peerCompanionId || debug?.peerWake?.actor_companion_id || null;
+    const peerCompanionSource = debug?.peerCompanionSource || (debug?.peerWake ? 'trusted_bot' : null);
     this.ctx.storage.sql.exec(
       `INSERT INTO companion_activity (id, companion_id, type, channel_id, content, author, author_id, engagement, message_id, webhook_url, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       crypto.randomUUID(), companionId, type, channelId || null, storedContent || null, author || null,
       debug?.authorId || null,
-      debug?.engagement ? JSON.stringify({
-        ...engagementDebug(debug.engagement),
-        mention_ids: debug.mentionIds || [],
-        referenced_author_id: debug.referencedAuthorId || null,
-        attachment_count: debug.attachments?.length || 0,
-        image_attachment_count: debug.attachments?.filter(isImageAttachmentMetadata).length || 0,
+      debug?.engagement || peerCompanionId ? JSON.stringify({
+        ...(debug?.engagement ? engagementDebug(debug.engagement) : {}),
+        mention_ids: debug?.mentionIds || [],
+        referenced_author_id: debug?.referencedAuthorId || null,
+        attachment_count: debug?.attachments?.length || 0,
+        image_attachment_count: debug?.attachments?.filter(isImageAttachmentMetadata).length || 0,
+        peer_companion_id: peerCompanionId,
+        peer_companion_source: peerCompanionSource,
       }) : null,
       messageId || null, webhookUrl || null, Date.now()
     );
+    const activityTimestamp = Date.now();
+    const targetProfileId = velariumProfileForCompanionId(companionId);
+    const actorProfileId = velariumProfileForCompanionId(peerCompanionId || undefined)
+      || velariumProfileForDiscordAuthor(this.env, debug?.authorId);
+    const socialActivity = {
+      type,
+      author_id: debug?.authorId,
+      message_id: messageId,
+      engagement: debug?.engagement || peerCompanionId ? JSON.stringify({
+        ...(debug?.engagement ? engagementDebug(debug.engagement) : {}),
+        referenced_author_id: debug?.referencedAuthorId || null,
+        peer_companion_id: peerCompanionId,
+        peer_companion_source: peerCompanionSource,
+      }) : null,
+    };
+    if (
+      targetProfileId
+      && actorProfileId
+      && targetProfileId !== actorProfileId
+      && isQualifyingVelariumSocialActivity(socialActivity)
+    ) {
+      this.recordVelariumSocialConnection(targetProfileId, actorProfileId, activityTimestamp);
+    }
     // Keep only last 200 entries per companion
     this.ctx.storage.sql.exec(
       `DELETE FROM companion_activity WHERE companion_id = ? AND id NOT IN (
@@ -2201,6 +2304,106 @@ export class CompanionBot extends McpAgent<Env> {
       timestamp: r.timestamp,
       age_seconds: Math.round((Date.now() - r.timestamp) / 1000),
     }));
+  }
+
+  private recordVelariumSocialConnection(
+    profileId: VelariumSocialProfileId,
+    connectionProfileId: VelariumSocialProfileId,
+    timestamp: number
+  ): void {
+    for (const [left, right] of [
+      [profileId, connectionProfileId],
+      [connectionProfileId, profileId],
+    ] as Array<[VelariumSocialProfileId, VelariumSocialProfileId]>) {
+      this.ctx.storage.sql.exec(
+        `INSERT INTO companion_social_connections (profile_id, connection_profile_id, last_engaged_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(profile_id, connection_profile_id) DO UPDATE SET
+           last_engaged_at = MAX(last_engaged_at, excluded.last_engaged_at)`,
+        left,
+        right,
+        timestamp
+      );
+    }
+  }
+
+  getVelariumSocialMap(profileId: string): Record<string, unknown> {
+    this.ensureTable();
+    const normalizedProfileId = String(profileId || '').trim().toLowerCase() as VelariumSocialProfileId;
+    const requested = VELARIUM_SOCIAL_PROFILES[normalizedProfileId];
+    if (!requested) {
+      return { ok: false, error: 'Unknown Velarium profile.' };
+    }
+
+    const targetCompanionIds = requested.companionId
+      ? [requested.companionId]
+      : Object.values(VELARIUM_SOCIAL_PROFILES).flatMap(profile => (
+          profile.companionId ? [profile.companionId] : []
+        ));
+
+    for (const companionId of targetCompanionIds) {
+      const rows = this.ctx.storage.sql.exec(
+        `SELECT type, author_id, engagement, message_id, timestamp
+         FROM companion_activity
+         WHERE companion_id = ?
+         ORDER BY timestamp DESC
+         LIMIT 200`,
+        companionId
+      ).toArray() as Record<string, unknown>[];
+
+      for (const row of rows) {
+        if (!isQualifyingVelariumSocialActivity(row)) continue;
+        const engagement = activityEngagement(row);
+        const connectionProfileId = velariumProfileForCompanionId(String(engagement.peer_companion_id || ''))
+          || velariumProfileForDiscordAuthor(this.env, String(row.author_id || ''));
+        const targetProfileId = velariumProfileForCompanionId(companionId);
+        if (!connectionProfileId || !targetProfileId || connectionProfileId === targetProfileId) continue;
+        this.recordVelariumSocialConnection(targetProfileId, connectionProfileId, Number(row.timestamp || 0));
+      }
+    }
+
+    const connections = this.ctx.storage.sql.exec(
+      `SELECT connection_profile_id, last_engaged_at
+       FROM companion_social_connections
+       WHERE profile_id = ?
+       ORDER BY last_engaged_at DESC`,
+      normalizedProfileId
+    ).toArray() as Array<{ connection_profile_id: string; last_engaged_at: number }>;
+
+    const socialMap = connections
+      .map(row => {
+        const connectionProfileId = row.connection_profile_id as VelariumSocialProfileId;
+        const timestamp = Number(row.last_engaged_at || 0);
+        const profile = VELARIUM_SOCIAL_PROFILES[connectionProfileId];
+        if (!profile) return null;
+        return {
+          id: connectionProfileId,
+          name: profile.name,
+          handle: profile.handle,
+          relation: 'Direct Discord connection',
+          lane: 'Discord engagement',
+          provenance: {
+            kind: 'live',
+            updatedAt: new Date(timestamp).toISOString(),
+            note: 'Qualifying direct engagement; message content and Discord identifiers withheld.',
+          },
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null);
+    const updatedAt = socialMap[0]?.provenance.updatedAt || new Date().toISOString();
+
+    return {
+      ok: true,
+      profileId: normalizedProfileId,
+      companionId: requested.companionId,
+      friendCount: socialMap.length,
+      socialMap,
+      provenance: {
+        kind: 'live',
+        updatedAt,
+        note: 'Known household connections derived from direct Discord engagement. Content and Discord identifiers are withheld.',
+      },
+    };
   }
 
   // Look up which companion sent a message by its Discord message_id (for reply detection)
@@ -2482,6 +2685,10 @@ export class CompanionBot extends McpAgent<Env> {
       `SELECT webhook_url FROM channel_webhooks WHERE channel_id = ?`, channelId
     ).toArray();
     return rows.length > 0 ? (rows[0] as any).webhook_url : null;
+  }
+
+  isStoredChannelWebhook(channelId: string, webhookId: unknown): boolean {
+    return isTrustedStoredWebhook(this.getChannelWebhook(channelId), webhookId);
   }
 
   storeChannelWebhook(channelId: string, webhookUrl: string) {
@@ -4266,6 +4473,10 @@ export class CompanionBot extends McpAgent<Env> {
 
     // ===== Companion activity API =====
 
+    if (url.pathname === '/internal/velarium/social-map' && request.method === 'GET') {
+      return Response.json(this.getVelariumSocialMap(url.searchParams.get('profile_id') || ''));
+    }
+
     const activityMatch = url.pathname.match(/^\/api\/companions\/([^/]+)\/activity$/);
     if (activityMatch && request.method === 'GET') {
       const limit = parseInt(url.searchParams.get('limit') || '50');
@@ -5106,7 +5317,7 @@ export class CompanionBot extends McpAgent<Env> {
 
           // For webhook messages, identify sending companion to prevent self-triggers
           let senderCompanionId: string | null = null;
-          if (isWebhook) {
+          if (isWebhook && this.isStoredChannelWebhook(channelId, msg.webhook_id)) {
             const senderName = msg.author?.username;
             if (senderName) {
               const allCompanions = this.getAllCompanions();
@@ -5352,12 +5563,17 @@ export class CompanionBot extends McpAgent<Env> {
               peerWake = peerDecision.peer_wake;
             }
 
-            const activityDebug = {
+            const activityDebug: ActivityDebug = {
               authorId: msg.author?.id,
               engagement,
               mentionIds,
               referencedAuthorId,
               createdAt: msg.timestamp,
+              ...(senderCompanionId ? {
+                continuityRole: 'companion' as const,
+                peerCompanionId: senderCompanionId,
+                peerCompanionSource: isWebhook ? 'trusted_webhook' : 'trusted_bot',
+              } : {}),
               ...(peerWake ? { continuityRole: 'companion' as const, peerWake } : {}),
             };
             const activityType = disposition === 'respond' ? 'queued' : disposition === 'log' ? 'logged' : 'ignored';
@@ -7236,6 +7452,60 @@ export default {
 
     if (request.method === 'OPTIONS') {
       return new Response(null, { headers: corsHeaders });
+    }
+
+    if (url.pathname === '/internal/velarium/social-map' && request.method === 'GET') {
+      const auth = request.headers.get('Authorization');
+      if (!env.VELARIUM_INTERNAL_TOKEN || auth !== `Bearer ${env.VELARIUM_INTERNAL_TOKEN}`) {
+        return Response.json({ ok: false, error: 'Unauthorized' }, {
+          status: 401,
+          headers: { 'Cache-Control': 'no-store' },
+        });
+      }
+      const id = env.COMPANION_BOT.idFromName('default');
+      const stub = env.COMPANION_BOT.get(id);
+      return stub.fetch(new Request(`https://internal${url.pathname}${url.search}`));
+    }
+
+    if (
+      request.method === 'GET'
+      && (
+        /^\/api\/companions\/[^/]+\/activity$/.test(url.pathname)
+        || url.pathname === '/api/activity'
+      )
+    ) {
+      const auth = request.headers.get('Authorization');
+      let authorized = Boolean(env.DASHBOARD_TOKEN && auth === `Bearer ${env.DASHBOARD_TOKEN}`);
+      const activityCompanionMatch = url.pathname.match(/^\/api\/companions\/([^/]+)\/activity$/);
+      if (!authorized) {
+        const sessionToken = request.headers.get('X-Session-Token');
+        if (sessionToken) {
+          const id = env.COMPANION_BOT.idFromName('default');
+          const stub = env.COMPANION_BOT.get(id);
+          const validation = await stub.fetch(new Request('https://internal/auth/validate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: sessionToken }),
+          }));
+          const session = await validation.json() as { valid?: boolean; discord_id?: string };
+          if (session.valid && session.discord_id) {
+            authorized = Boolean(env.ADMIN_DISCORD_ID && session.discord_id === env.ADMIN_DISCORD_ID);
+            if (!authorized && activityCompanionMatch) {
+              const companionResponse = await stub.fetch(new Request(
+                `https://internal/api/companions/${activityCompanionMatch[1]}`
+              ));
+              const companion = await companionResponse.json() as { owner_id?: string };
+              authorized = companion.owner_id === session.discord_id;
+            }
+          }
+        }
+      }
+      if (!authorized) {
+        return Response.json({ error: 'Unauthorized' }, {
+          status: 401,
+          headers: { 'Cache-Control': 'no-store', ...corsHeaders },
+        });
+      }
     }
 
     if (url.pathname === '/api/runner/kai/dm-channel' && request.method === 'POST') {

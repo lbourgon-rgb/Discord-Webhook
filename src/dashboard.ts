@@ -1519,7 +1519,9 @@ export function renderRegisterPage(baseUrl: string, clientId: string): string {
       const feed = document.getElementById('activityFeed');
       const empty = document.getElementById('activityEmpty');
       try {
-        const res = await fetch(API + '/companions/' + myCompanion.id + '/activity?limit=50');
+        const res = await fetch(API + '/companions/' + myCompanion.id + '/activity?limit=50', {
+          headers: getHeaders()
+        });
         const data = await res.json();
         const activity = data.activity || [];
 
