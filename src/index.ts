@@ -1455,6 +1455,11 @@ interface KaiHarnessDeliveryRequest {
   generated_images?: unknown;
 }
 
+interface KaiHarnessReadMessagesRequest {
+  channel_id: string;
+  limit?: number;
+}
+
 interface KaiHarnessDeliveryReceipt {
   response_event_id: string;
   wake_candidate_id: string;
@@ -3985,6 +3990,62 @@ export class CompanionBot extends McpAgent<Env> {
         conversation_ids: [...new Set(conversationIds)].sort(),
         category_ids: getKaiSocialHardTagCategoryIds(this.env),
         sync,
+      }, { headers: { 'Cache-Control': 'no-store' } });
+    }
+
+    if (url.pathname === '/api/runner/kai/read-messages' && request.method === 'POST') {
+      const body = await request.json().catch(() => null) as KaiHarnessReadMessagesRequest | null;
+      const channelId = String(body?.channel_id || '').trim();
+      const requestedLimit = Number(body?.limit ?? 20);
+      const limit = Number.isFinite(requestedLimit)
+        ? Math.min(50, Math.max(1, Math.trunc(requestedLimit)))
+        : 20;
+      if (!/^\d+$/.test(channelId)) {
+        return Response.json({ error: 'channel_id must be a Discord channel ID' }, { status: 400 });
+      }
+
+      let readApproved = isKaiAccessibleChannel(this.env, channelId)
+        || this.isKaiDmChannel(channelId)
+        || this.isKaiCategoryHardTagChannel(channelId);
+      if (!readApproved && getKaiSocialHardTagCategoryIds(this.env).length > 0) {
+        await this.syncKaiCategoryHardTagMonitors(true);
+        readApproved = this.isKaiCategoryHardTagChannel(channelId);
+      }
+      if (!readApproved) {
+        return Response.json({ error: 'Channel is not approved for Kai Discord reading' }, { status: 403 });
+      }
+
+      const messages = await discordRequest(this.env, `/channels/${channelId}/messages?limit=${limit}`);
+      if (!Array.isArray(messages)) {
+        return Response.json({ error: 'Discord message read failed', detail: messages }, { status: 502 });
+      }
+      const formatted = messages.map((message: any) => ({
+        id: String(message?.id || ''),
+        content: String(message?.content || ''),
+        author: {
+          id: String(message?.author?.id || ''),
+          username: String(message?.author?.global_name || message?.author?.username || 'unknown'),
+          bot: message?.author?.bot === true,
+        },
+        timestamp: String(message?.timestamp || ''),
+        attachments: Array.isArray(message?.attachments)
+          ? message.attachments.map((attachment: any) => ({
+              id: String(attachment?.id || ''),
+              filename: String(attachment?.filename || ''),
+              content_type: String(attachment?.content_type || ''),
+              url: String(attachment?.url || ''),
+            }))
+          : [],
+        reply_to: /^\d+$/.test(String(message?.message_reference?.message_id || ''))
+          ? String(message.message_reference.message_id)
+          : null,
+      })).sort((left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp));
+
+      return Response.json({
+        ok: true,
+        channel_id: channelId,
+        message_count: formatted.length,
+        messages: formatted,
       }, { headers: { 'Cache-Control': 'no-store' } });
     }
 
@@ -7532,6 +7593,21 @@ export default {
       const id = env.COMPANION_BOT.idFromName('default');
       const stub = env.COMPANION_BOT.get(id);
       return stub.fetch(new Request('https://internal/api/runner/kai/claim-conversations', request));
+    }
+
+    if (url.pathname === '/api/runner/kai/read-messages' && request.method === 'POST') {
+      if (!isKaiHarnessAuthorized(request, env)) {
+        return Response.json({ error: 'Unauthorized' }, { status: 401, headers: { 'Cache-Control': 'no-store' } });
+      }
+      const body = await request.clone().json().catch(() => null) as KaiHarnessReadMessagesRequest | null;
+      const channelId = String(body?.channel_id || '').trim();
+      const categoryReadConfigured = getKaiSocialHardTagCategoryIds(env).length > 0;
+      if (!/^\d+$/.test(channelId) || (!isKaiAccessibleChannel(env, channelId) && !isKaiDmIngressEnabled(env) && !categoryReadConfigured)) {
+        return Response.json({ error: 'Channel is not approved for Kai Discord reading' }, { status: 403, headers: { 'Cache-Control': 'no-store' } });
+      }
+      const id = env.COMPANION_BOT.idFromName('default');
+      const stub = env.COMPANION_BOT.get(id);
+      return stub.fetch(new Request('https://internal/api/runner/kai/read-messages', request));
     }
 
     if (url.pathname === '/api/runner/kai/deliver' && request.method === 'POST') {

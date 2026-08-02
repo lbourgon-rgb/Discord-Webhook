@@ -303,6 +303,18 @@ test('Kai harness delivery is authenticated, allowlisted, gated, and idempotent'
   assert.doesNotMatch(source, /Number\(body\?\.wake_candidate_id\)/);
 });
 
+test('Kai residence Discord reading is authenticated, read-only, scoped, and bounded', () => {
+  assert.match(source, /interface KaiHarnessReadMessagesRequest/);
+  assert.match(source, /url\.pathname === '\/api\/runner\/kai\/read-messages'/);
+  assert.match(source, /isKaiHarnessAuthorized\(request, env\)/);
+  assert.match(source, /let readApproved = isKaiAccessibleChannel\(this\.env, channelId\)/);
+  assert.match(source, /\|\| this\.isKaiDmChannel\(channelId\)/);
+  assert.match(source, /\|\| this\.isKaiCategoryHardTagChannel\(channelId\)/);
+  assert.match(source, /Math\.min\(50, Math\.max\(1, Math\.trunc\(requestedLimit\)\)\)/);
+  assert.match(source, /discordRequest\(this\.env, `\/channels\/\$\{channelId\}\/messages\?limit=\$\{limit\}`\)/);
+  assert.match(source, /Channel is not approved for Kai Discord reading/);
+});
+
 test('Kai fallback delegates before generation and fences Continuity before Discord delivery', () => {
   assert.match(source, /class KaiRunnerDelegatedError extends Error/);
   assert.match(source, /claim\?\.delegated_to_runner === true/);
