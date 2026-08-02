@@ -307,11 +307,13 @@ test('Kai residence Discord reading is authenticated, read-only, scoped, and bou
   assert.match(source, /interface KaiHarnessReadMessagesRequest/);
   assert.match(source, /url\.pathname === '\/api\/runner\/kai\/read-messages'/);
   assert.match(source, /isKaiHarnessAuthorized\(request, env\)/);
-  assert.match(source, /let readApproved = isKaiAccessibleChannel\(this\.env, channelId\)/);
+  assert.match(source, /let readApproved = isKaiHarnessDeliveryChannel\(this\.env, channelId\)/);
   assert.match(source, /\|\| this\.isKaiDmChannel\(channelId\)/);
   assert.match(source, /\|\| this\.isKaiCategoryHardTagChannel\(channelId\)/);
   assert.match(source, /Math\.min\(50, Math\.max\(1, Math\.trunc\(requestedLimit\)\)\)/);
   assert.match(source, /discordRequest\(this\.env, `\/channels\/\$\{channelId\}\/messages\?limit=\$\{limit\}`\)/);
+  assert.match(source, /attachments: Array\.isArray\(message\?\.attachments\) \? message\.attachments\.length : 0/);
+  assert.doesNotMatch(source, /url: String\(attachment\?\.url/);
   assert.match(source, /Channel is not approved for Kai Discord reading/);
 });
 

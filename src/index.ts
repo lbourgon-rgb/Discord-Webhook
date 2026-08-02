@@ -4004,7 +4004,7 @@ export class CompanionBot extends McpAgent<Env> {
         return Response.json({ error: 'channel_id must be a Discord channel ID' }, { status: 400 });
       }
 
-      let readApproved = isKaiAccessibleChannel(this.env, channelId)
+      let readApproved = isKaiHarnessDeliveryChannel(this.env, channelId)
         || this.isKaiDmChannel(channelId)
         || this.isKaiCategoryHardTagChannel(channelId);
       if (!readApproved && getKaiSocialHardTagCategoryIds(this.env).length > 0) {
@@ -4028,14 +4028,7 @@ export class CompanionBot extends McpAgent<Env> {
           bot: message?.author?.bot === true,
         },
         timestamp: String(message?.timestamp || ''),
-        attachments: Array.isArray(message?.attachments)
-          ? message.attachments.map((attachment: any) => ({
-              id: String(attachment?.id || ''),
-              filename: String(attachment?.filename || ''),
-              content_type: String(attachment?.content_type || ''),
-              url: String(attachment?.url || ''),
-            }))
-          : [],
+        attachments: Array.isArray(message?.attachments) ? message.attachments.length : 0,
         reply_to: /^\d+$/.test(String(message?.message_reference?.message_id || ''))
           ? String(message.message_reference.message_id)
           : null,
@@ -7602,7 +7595,7 @@ export default {
       const body = await request.clone().json().catch(() => null) as KaiHarnessReadMessagesRequest | null;
       const channelId = String(body?.channel_id || '').trim();
       const categoryReadConfigured = getKaiSocialHardTagCategoryIds(env).length > 0;
-      if (!/^\d+$/.test(channelId) || (!isKaiAccessibleChannel(env, channelId) && !isKaiDmIngressEnabled(env) && !categoryReadConfigured)) {
+      if (!/^\d+$/.test(channelId) || (!isKaiHarnessDeliveryChannel(env, channelId) && !isKaiDmIngressEnabled(env) && !categoryReadConfigured)) {
         return Response.json({ error: 'Channel is not approved for Kai Discord reading' }, { status: 403, headers: { 'Cache-Control': 'no-store' } });
       }
       const id = env.COMPANION_BOT.idFromName('default');
