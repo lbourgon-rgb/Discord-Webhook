@@ -159,40 +159,55 @@ export function validateKaiResidenceDeliveryProof(
 
 export function canonicalKaiResidenceMessage(
   job: KaiResidenceDeliveryJob,
-  value: unknown,
+  canonicalValue: unknown,
+  sourceValue: unknown,
 ): ParseResult<KaiResidenceCanonicalMessage> {
-  const envelope = asRecord(value);
-  const event = asRecord(envelope.event);
-  const metadata = asRecord(event.metadata);
-  const wakeResponse = asRecord(metadata.wake_response);
+  const response = asRecord(canonicalValue);
   const comparisons: Array<[string, unknown, string | number]> = [
-    ['event.id', event.id, job.response_event_id],
-    ['event.companion_id', event.companion_id, 'kaisoryth'],
-    ['event.source', event.source, job.surface],
-    ['event.conversation_id', event.conversation_id, job.conversation_id],
-    ['event.role', event.role, 'companion'],
-    ['wake_response.wake_candidate_id', wakeResponse.wake_candidate_id, job.candidate_id],
-    ['wake_response.source_event_id', wakeResponse.source_event_id, job.source_event_id],
-    ['wake_response.continuity_event_id', wakeResponse.continuity_event_id, job.continuity_event_id],
-    ['wake_response.runner_id', wakeResponse.runner_id, job.runner_id],
-    ['wake_response.runner_epoch', Number(wakeResponse.runner_epoch), job.runner_epoch],
-    ['wake_response.lease_epoch', Number(wakeResponse.lease_epoch), job.candidate_lease_epoch],
+    ['response_event_id', response.response_event_id, job.response_event_id],
+    ['companion_id', response.companion_id, 'kaisoryth'],
+    ['candidate_id', response.candidate_id, job.candidate_id],
+    ['source_event_id', response.source_event_id, job.source_event_id],
+    ['continuity_event_id', response.continuity_event_id, job.continuity_event_id],
+    ['surface', response.surface, job.surface],
+    ['conversation_id', response.conversation_id, job.conversation_id],
+    ['session_id', response.session_id, job.session_id],
+    ['runner_id', response.runner_id, job.runner_id],
+    ['runner_epoch', Number(response.runner_epoch), job.runner_epoch],
+    ['candidate_lease_epoch', Number(response.candidate_lease_epoch), job.candidate_lease_epoch],
   ];
   for (const [field, actualValue, expectedValue] of comparisons) {
     const actual = typeof expectedValue === 'number' ? Number(actualValue) : String(actualValue || '');
-    if (actual !== expectedValue) return { ok: false, error: `Canonical response event mismatch: ${field}` };
+    if (actual !== expectedValue) return { ok: false, error: `Canonical response mismatch: ${field}` };
   }
 
-  const content = typeof event.content === 'string' ? event.content.trim() : '';
+  const content = typeof response.content === 'string' ? response.content.trim() : '';
   if (!content || content.length > 20_000) {
-    return { ok: false, error: 'Canonical response event content is empty or exceeds the transport limit' };
+    return { ok: false, error: 'Canonical response content is empty or exceeds the transport limit' };
   }
-  const replyTo = String(event.reply_to || '').trim();
+
+  const sourceEnvelope = asRecord(sourceValue);
+  const sourceEvent = asRecord(sourceEnvelope.event);
+  const sourceComparisons: Array<[string, unknown, string]> = [
+    ['source.event.id', sourceEvent.id, job.continuity_event_id],
+    ['source.event.companion_id', sourceEvent.companion_id, 'kaisoryth'],
+    ['source.event.source', sourceEvent.source, job.surface],
+    ['source.event.conversation_id', sourceEvent.conversation_id, job.conversation_id],
+  ];
+  for (const [field, actualValue, expectedValue] of sourceComparisons) {
+    if (String(actualValue || '') !== expectedValue) {
+      return { ok: false, error: `Canonical source event mismatch: ${field}` };
+    }
+  }
+  const replyTo = String(sourceEvent.external_message_id || '').trim();
+  if (!/^\d+$/.test(replyTo)) {
+    return { ok: false, error: 'Canonical source event has no Discord message identity' };
+  }
   return {
     ok: true,
     value: {
       content,
-      reply_to_message_id: /^\d+$/.test(replyTo) ? replyTo : null,
+      reply_to_message_id: replyTo,
     },
   };
 }

@@ -51,26 +51,34 @@ function proof(overrides = {}) {
   };
 }
 
-function responseEvent(overrides = {}) {
+function canonicalResponse(overrides = {}) {
+  return {
+    companion_id: 'kaisoryth',
+    response_event_id: 'response-1',
+    candidate_id: 'candidate-1',
+    source_event_id: 'residence-source-1',
+    continuity_event_id: 'continuity-source-1',
+    surface: 'discord',
+    conversation_id: 'discord:1416976728223514780',
+    session_id: 'kai-inbox',
+    runner_id: 'serythrae-platform:mini-pc',
+    runner_epoch: 7,
+    candidate_lease_epoch: 11,
+    committed_at: '2026-08-25T12:00:00.000Z',
+    content: 'Canonical Kai response.',
+    ...overrides,
+  };
+}
+
+function sourceEvent(overrides = {}) {
   return {
     event: {
-      id: 'response-1',
+      id: 'continuity-source-1',
       companion_id: 'kaisoryth',
       source: 'discord',
       conversation_id: 'discord:1416976728223514780',
-      role: 'companion',
-      content: 'Canonical Kai response.',
-      reply_to: '1511111111111111111',
-      metadata: {
-        wake_response: {
-          wake_candidate_id: 'candidate-1',
-          source_event_id: 'residence-source-1',
-          continuity_event_id: 'continuity-source-1',
-          runner_id: 'serythrae-platform:mini-pc',
-          runner_epoch: 7,
-          lease_epoch: 11,
-        },
-      },
+      role: 'human',
+      external_message_id: '1511111111111111111',
       ...overrides,
     },
   };
@@ -113,26 +121,22 @@ test('all canonical ownership fields must match the Continuity delivery proof', 
   }
 });
 
-test('Discord content and reply identity come only from the canonical response event', () => {
+test('Discord content comes from the canonical response and reply identity from its canonical source event', () => {
   const parsed = parseKaiResidenceDeliveryJob(job());
   assert.equal(parsed.ok, true);
-  const canonical = canonicalKaiResidenceMessage(parsed.value, responseEvent());
+  const canonical = canonicalKaiResidenceMessage(parsed.value, canonicalResponse(), sourceEvent());
   assert.deepEqual(canonical, {
     ok: true,
     value: { content: 'Canonical Kai response.', reply_to_message_id: '1511111111111111111' },
   });
 
-  assert.equal(canonicalKaiResidenceMessage(parsed.value, responseEvent({ companion_id: 'morzar' })).ok, false);
-  assert.equal(canonicalKaiResidenceMessage(parsed.value, responseEvent({ content: '' })).ok, false);
-  assert.equal(canonicalKaiResidenceMessage(parsed.value, responseEvent({
-    metadata: { wake_response: { ...responseEvent().event.metadata.wake_response, source_event_id: 'other-residence-source' } },
-  })).ok, false);
-  assert.equal(canonicalKaiResidenceMessage(parsed.value, responseEvent({
-    metadata: { wake_response: { ...responseEvent().event.metadata.wake_response, continuity_event_id: 'other-continuity-source' } },
-  })).ok, false);
-  assert.equal(canonicalKaiResidenceMessage(parsed.value, responseEvent({
-    metadata: { wake_response: { ...responseEvent().event.metadata.wake_response, runner_epoch: 99 } },
-  })).ok, false);
+  assert.equal(canonicalKaiResidenceMessage(parsed.value, canonicalResponse({ companion_id: 'morzar' }), sourceEvent()).ok, false);
+  assert.equal(canonicalKaiResidenceMessage(parsed.value, canonicalResponse({ content: '' }), sourceEvent()).ok, false);
+  assert.equal(canonicalKaiResidenceMessage(parsed.value, canonicalResponse({ source_event_id: 'other-residence-source' }), sourceEvent()).ok, false);
+  assert.equal(canonicalKaiResidenceMessage(parsed.value, canonicalResponse({ continuity_event_id: 'other-continuity-source' }), sourceEvent()).ok, false);
+  assert.equal(canonicalKaiResidenceMessage(parsed.value, canonicalResponse({ runner_epoch: 99 }), sourceEvent()).ok, false);
+  assert.equal(canonicalKaiResidenceMessage(parsed.value, canonicalResponse(), sourceEvent({ id: 'other-source' })).ok, false);
+  assert.equal(canonicalKaiResidenceMessage(parsed.value, canonicalResponse(), sourceEvent({ external_message_id: 'not-discord' })).ok, false);
 });
 
 test('transport receipt identity is deterministic for a job and its Discord messages', async () => {
@@ -157,7 +161,8 @@ test('residence transport is separate from the harness and explicitly promoted i
   assert.match(workerSource, /url\.pathname === '\/api\/residence\/kaisoryth\/read-messages'/);
   assert.match(workerSource, /url\.pathname === '\/api\/residence\/kaisoryth\/deliver'/);
   assert.match(workerSource, /wake-responses\/\$\{encodeURIComponent\(job\.response_event_id\)\}\/delivery-proof/);
-  assert.match(workerSource, /events\/\$\{encodeURIComponent\(job\.response_event_id\)\}/);
+  assert.match(workerSource, /control\/wake-responses\/\$\{encodeURIComponent\(job\.response_event_id\)\}/);
+  assert.match(workerSource, /events\/\$\{encodeURIComponent\(job\.continuity_event_id\)\}/);
   assert.match(workerSource, /kai:residence-delivery:\$\{job\.job_key\}/);
   assert.match(workerSource, /kaiResidenceTransportReceiptId\(job, receipt\.sent_message_ids\)/);
   assert.match(workerSource, /canonicalMessage\.value\.content/);

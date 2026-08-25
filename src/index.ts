@@ -4223,16 +4223,22 @@ export class CompanionBot extends McpAgent<Env> {
       }
 
       let proofResult: unknown;
-      let responseEventResult: unknown;
+      let canonicalResponseResult: unknown;
+      let sourceEventResult: unknown;
       try {
         proofResult = await continuityRequest(
           this.env,
           `/wake-responses/${encodeURIComponent(job.response_event_id)}/delivery-proof`,
           { method: 'GET' },
         );
-        responseEventResult = await continuityRequest(
+        canonicalResponseResult = await continuityRequest(
           this.env,
-          `/events/${encodeURIComponent(job.response_event_id)}`,
+          `/control/wake-responses/${encodeURIComponent(job.response_event_id)}`,
+          { method: 'GET' },
+        );
+        sourceEventResult = await continuityRequest(
+          this.env,
+          `/events/${encodeURIComponent(job.continuity_event_id)}`,
           { method: 'GET' },
         );
       } catch (error) {
@@ -4244,7 +4250,7 @@ export class CompanionBot extends McpAgent<Env> {
 
       const proofError = validateKaiResidenceDeliveryProof(job, proofResult);
       if (proofError) return Response.json({ error: proofError }, { status: 409 });
-      const canonicalMessage = canonicalKaiResidenceMessage(job, responseEventResult);
+      const canonicalMessage = canonicalKaiResidenceMessage(job, canonicalResponseResult, sourceEventResult);
       if (!canonicalMessage.ok) return Response.json({ error: canonicalMessage.error }, { status: 409 });
 
       const receiptKey = `kai:residence-delivery:${job.job_key}`;
