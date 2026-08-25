@@ -22,6 +22,16 @@ import { commitRequiredContinuityIngress } from "./continuity-ingress";
 import { selectKaiCategoryMonitorChannels } from "./kai-category-scope";
 import { isTrustedStoredWebhook } from "./social-provenance";
 import {
+  canonicalKaiResidenceMessage,
+  isKaiResidenceBearerAuthorized,
+  kaiResidenceChannelId,
+  kaiResidenceJobFingerprint,
+  kaiResidenceTransportReceiptId,
+  parseKaiResidenceDeliveryJob,
+  validateKaiResidenceDeliveryProof,
+  type KaiResidenceDeliveryJob,
+} from "./kai-residence-discord";
+import {
   decideTrustedPeerIngress,
   identifyTrustedPeerCompanion,
   isLegacyKaiPeerHardTagActor,
@@ -65,6 +75,8 @@ interface Env {
   KAI_DISCORD_DELIVERY_ENABLED?: string;
   KAI_HARNESS_API_KEY?: string;
   KAI_HARNESS_DELIVERY_CHANNEL_IDS?: string;
+  KAI_RESIDENCE_DISCORD_API_KEY?: string;
+  KAI_RESIDENCE_DISCORD_DELIVERY_ENABLED?: string;
   KAI_DISCORD_AUTORESPOND?: string;
   KAI_RUNNER_ROUTE?: string;
   KAI_NEXUS_URL?: string;
@@ -205,6 +217,10 @@ function isKaiListenerEnabled(env: Env): boolean {
 
 function isKaiDeliveryEnabled(env: Env): boolean {
   return env.KAI_DISCORD_DELIVERY_ENABLED === 'true';
+}
+
+function isKaiResidenceDeliveryEnabled(env: Env): boolean {
+  return env.KAI_RESIDENCE_DISCORD_DELIVERY_ENABLED === 'true';
 }
 
 function isKaiHarnessAuthorized(request: Request, env: Env): boolean {
@@ -1471,10 +1487,29 @@ interface KaiHarnessDeliveryReceipt {
   completed: boolean;
 }
 
+interface KaiResidenceDeliveryReceipt extends KaiResidenceDeliveryJob {
+  job_fingerprint: string;
+  channel_id: string;
+  sent_message_ids: string[];
+  next_chunk: number;
+  completed: boolean;
+  transport_receipt_id: string | null;
+  completed_at: string | null;
+}
+
 async function kaiHarnessDiscordNonce(responseEventId: string, chunkIndex: number): Promise<string> {
   const digest = await crypto.subtle.digest(
     'SHA-256',
     new TextEncoder().encode(`kai-harness:${responseEventId}:${chunkIndex}`),
+  );
+  const value = new DataView(digest).getBigUint64(0) & ((1n << 63n) - 1n);
+  return value.toString(10);
+}
+
+async function kaiResidenceDiscordNonce(jobKey: string, chunkIndex: number): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(`kai-residence:${jobKey}:${chunkIndex}`),
   );
   const value = new DataView(digest).getBigUint64(0) & ((1n << 63n) - 1n);
   return value.toString(10);
@@ -3993,7 +4028,9 @@ export class CompanionBot extends McpAgent<Env> {
       }, { headers: { 'Cache-Control': 'no-store' } });
     }
 
-    if (url.pathname === '/api/runner/kai/read-messages' && request.method === 'POST') {
+    if ((url.pathname === '/api/runner/kai/read-messages'
+      || url.pathname === '/api/residence/kaisoryth/read-messages')
+      && request.method === 'POST') {
       const body = await request.json().catch(() => null) as KaiHarnessReadMessagesRequest | null;
       const channelId = String(body?.channel_id || '').trim();
       const requestedLimit = Number(body?.limit ?? 20);
@@ -4163,6 +4200,177 @@ export class CompanionBot extends McpAgent<Env> {
         completed_at: new Date().toISOString(),
       });
       return Response.json({ ok: true, replayed: false, ...receipt });
+    }
+
+    if (url.pathname === '/api/residence/kaisoryth/deliver' && request.method === 'POST') {
+      if (!isKaiResidenceDeliveryEnabled(this.env)) {
+        return Response.json({ error: 'Kai residence Discord delivery is disabled' }, { status: 409 });
+      }
+      const parsed = parseKaiResidenceDeliveryJob(await request.json().catch(() => null));
+      if (!parsed.ok) return Response.json({ error: parsed.error }, { status: 400 });
+      const job = parsed.value;
+      const channelId = kaiResidenceChannelId(job);
+
+      let deliveryApproved = isKaiHarnessDeliveryChannel(this.env, channelId)
+        || this.isKaiDmChannel(channelId)
+        || this.isKaiCategoryHardTagChannel(channelId);
+      if (!deliveryApproved && getKaiSocialHardTagCategoryIds(this.env).length > 0) {
+        await this.syncKaiCategoryHardTagMonitors(true);
+        deliveryApproved = this.isKaiCategoryHardTagChannel(channelId);
+      }
+      if (!deliveryApproved) {
+        return Response.json({ error: 'Channel is not approved for Kai residence delivery' }, { status: 403 });
+      }
+
+      let proofResult: unknown;
+      let responseEventResult: unknown;
+      try {
+        proofResult = await continuityRequest(
+          this.env,
+          `/wake-responses/${encodeURIComponent(job.response_event_id)}/delivery-proof`,
+          { method: 'GET' },
+        );
+        responseEventResult = await continuityRequest(
+          this.env,
+          `/events/${encodeURIComponent(job.response_event_id)}`,
+          { method: 'GET' },
+        );
+      } catch (error) {
+        return Response.json({
+          error: 'Canonical Continuity delivery proof is unavailable',
+          detail: error instanceof Error ? error.message : String(error),
+        }, { status: 502 });
+      }
+
+      const proofError = validateKaiResidenceDeliveryProof(job, proofResult);
+      if (proofError) return Response.json({ error: proofError }, { status: 409 });
+      const canonicalMessage = canonicalKaiResidenceMessage(job, responseEventResult);
+      if (!canonicalMessage.ok) return Response.json({ error: canonicalMessage.error }, { status: 409 });
+
+      const receiptKey = `kai:residence-delivery:${job.job_key}`;
+      const jobFingerprint = kaiResidenceJobFingerprint(job);
+      const existing = await this.ctx.storage.get<KaiResidenceDeliveryReceipt>(receiptKey);
+      if (existing && existing.job_fingerprint !== jobFingerprint) {
+        return Response.json({ error: 'job_key is already bound to a different canonical delivery proof' }, { status: 409 });
+      }
+      if (existing?.completed && existing.transport_receipt_id && existing.completed_at) {
+        return Response.json({
+          ok: true,
+          replayed: true,
+          companion_id: existing.companion_id,
+          job_key: existing.job_key,
+          response_event_id: existing.response_event_id,
+          candidate_id: existing.candidate_id,
+          source_event_id: existing.source_event_id,
+          continuity_event_id: existing.continuity_event_id,
+          surface: existing.surface,
+          conversation_id: existing.conversation_id,
+          session_id: existing.session_id,
+          status: 'delivered',
+          transport_receipt_id: existing.transport_receipt_id,
+          sent_message_ids: existing.sent_message_ids,
+          completed_at: existing.completed_at,
+        });
+      }
+
+      const chunks = splitMessage(canonicalMessage.value.content);
+      const receipt: KaiResidenceDeliveryReceipt = existing || {
+        ...job,
+        job_fingerprint: jobFingerprint,
+        channel_id: channelId,
+        sent_message_ids: [],
+        next_chunk: 0,
+        completed: false,
+        transport_receipt_id: null,
+        completed_at: null,
+      };
+      if (!existing) await this.ctx.storage.put(receiptKey, receipt);
+
+      for (let index = receipt.next_chunk; index < chunks.length; index += 1) {
+        const messageBody: Record<string, unknown> = {
+          content: chunks[index],
+          nonce: await kaiResidenceDiscordNonce(job.job_key, index),
+          enforce_nonce: true,
+          allowed_mentions: { parse: [] },
+        };
+        if (index === 0 && canonicalMessage.value.reply_to_message_id) {
+          messageBody.message_reference = {
+            message_id: canonicalMessage.value.reply_to_message_id,
+            fail_if_not_exists: false,
+          };
+        }
+        const result = await discordRequest(this.env, `/channels/${channelId}/messages`, {
+          method: 'POST',
+          body: JSON.stringify(messageBody),
+        });
+        if (result?.error || !result?.id) {
+          return Response.json({
+            ok: false,
+            companion_id: job.companion_id,
+            job_key: job.job_key,
+            response_event_id: job.response_event_id,
+            candidate_id: job.candidate_id,
+            source_event_id: job.source_event_id,
+            continuity_event_id: job.continuity_event_id,
+            surface: job.surface,
+            conversation_id: job.conversation_id,
+            session_id: job.session_id,
+            status: 'queued',
+            transport_receipt_id: null,
+            error: 'Discord residence delivery failed',
+          }, { status: 502 });
+        }
+        receipt.sent_message_ids[index] = String(result.id);
+        receipt.next_chunk = index + 1;
+        await this.ctx.storage.put(receiptKey, receipt);
+      }
+
+      receipt.transport_receipt_id = await kaiResidenceTransportReceiptId(job, receipt.sent_message_ids);
+      receipt.completed_at = new Date().toISOString();
+      receipt.completed = true;
+      await this.ctx.storage.put(receiptKey, receipt);
+      if (canonicalMessage.value.reply_to_message_id) {
+        this.ctx.storage.sql.exec(
+          `DELETE FROM pending_commands
+           WHERE companion_id IN ('kai', 'kaisoryth') AND channel_id = ? AND message_id = ?`,
+          channelId,
+          canonicalMessage.value.reply_to_message_id,
+        );
+      }
+      await this.ctx.storage.put('kai:last_residence_delivery', {
+        companion_id: job.companion_id,
+        job_key: job.job_key,
+        response_event_id: job.response_event_id,
+        candidate_id: job.candidate_id,
+        source_event_id: job.source_event_id,
+        continuity_event_id: job.continuity_event_id,
+        surface: job.surface,
+        conversation_id: job.conversation_id,
+        session_id: job.session_id,
+        runner_id: job.runner_id,
+        runner_epoch: job.runner_epoch,
+        candidate_lease_epoch: job.candidate_lease_epoch,
+        transport_receipt_id: receipt.transport_receipt_id,
+        sent_message_ids: receipt.sent_message_ids,
+        completed_at: receipt.completed_at,
+      });
+      return Response.json({
+        ok: true,
+        replayed: false,
+        companion_id: job.companion_id,
+        job_key: job.job_key,
+        response_event_id: job.response_event_id,
+        candidate_id: job.candidate_id,
+        source_event_id: job.source_event_id,
+        continuity_event_id: job.continuity_event_id,
+        surface: job.surface,
+        conversation_id: job.conversation_id,
+        session_id: job.session_id,
+        status: 'delivered',
+        transport_receipt_id: receipt.transport_receipt_id,
+        sent_message_ids: receipt.sent_message_ids,
+        completed_at: receipt.completed_at,
+      });
     }
 
     if (url.pathname === '/trigger' && request.method === 'POST') {
@@ -7603,6 +7811,20 @@ export default {
       return stub.fetch(new Request('https://internal/api/runner/kai/read-messages', request));
     }
 
+    if (url.pathname === '/api/residence/kaisoryth/read-messages' && request.method === 'POST') {
+      if (!await isKaiResidenceBearerAuthorized(request, env.KAI_RESIDENCE_DISCORD_API_KEY)) {
+        return Response.json({ error: 'Unauthorized' }, { status: 401, headers: { 'Cache-Control': 'no-store' } });
+      }
+      const body = await request.clone().json().catch(() => null) as KaiHarnessReadMessagesRequest | null;
+      const channelId = String(body?.channel_id || '').trim();
+      if (!/^\d+$/.test(channelId)) {
+        return Response.json({ error: 'channel_id must be a Discord channel ID' }, { status: 400, headers: { 'Cache-Control': 'no-store' } });
+      }
+      const id = env.COMPANION_BOT.idFromName('default');
+      const stub = env.COMPANION_BOT.get(id);
+      return stub.fetch(new Request('https://internal/api/residence/kaisoryth/read-messages', request));
+    }
+
     if (url.pathname === '/api/runner/kai/deliver' && request.method === 'POST') {
       if (!isKaiHarnessAuthorized(request, env)) {
         return Response.json({ error: 'Unauthorized' }, { status: 401, headers: { 'Cache-Control': 'no-store' } });
@@ -7621,6 +7843,18 @@ export default {
       return stub.fetch(new Request('https://internal/api/runner/kai/deliver', request));
     }
 
+    if (url.pathname === '/api/residence/kaisoryth/deliver' && request.method === 'POST') {
+      if (!await isKaiResidenceBearerAuthorized(request, env.KAI_RESIDENCE_DISCORD_API_KEY)) {
+        return Response.json({ error: 'Unauthorized' }, { status: 401, headers: { 'Cache-Control': 'no-store' } });
+      }
+      if (!isKaiResidenceDeliveryEnabled(env)) {
+        return Response.json({ error: 'Kai residence Discord delivery is disabled' }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+      }
+      const id = env.COMPANION_BOT.idFromName('default');
+      const stub = env.COMPANION_BOT.get(id);
+      return stub.fetch(new Request('https://internal/api/residence/kaisoryth/deliver', request));
+    }
+
     // Health check
     if (url.pathname === '/' || url.pathname === '/health') {
       return new Response(JSON.stringify({
@@ -7629,6 +7863,11 @@ export default {
         version: '1.0.0',
         companions: Object.keys(SEED_COMPANIONS),
         features: ['mcp', 'sse', 'trigger', 'webhook-dispatch', 'cron-poll', 'dashboard'],
+        kai_residence_transport: {
+          auth_configured: Boolean(env.KAI_RESIDENCE_DISCORD_API_KEY),
+          read_auth_configured: Boolean(env.KAI_RESIDENCE_DISCORD_API_KEY),
+          delivery_enabled: isKaiResidenceDeliveryEnabled(env),
+        },
       }, null, 2), {
         headers: { 'Content-Type': 'application/json', ...corsHeaders },
       });
