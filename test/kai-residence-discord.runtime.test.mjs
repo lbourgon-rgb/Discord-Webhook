@@ -150,7 +150,7 @@ test('transport receipt identity is deterministic for a job and its Discord mess
   assert.match(first, /^sha256:[a-f0-9]{64}$/);
 });
 
-test('residence transport is separate from the harness and remains disabled by default', () => {
+test('residence transport is separate from the harness and explicitly promoted in production config', () => {
   assert.match(workerSource, /KAI_RESIDENCE_DISCORD_API_KEY\?: string/);
   assert.match(workerSource, /KAI_RESIDENCE_DISCORD_DELIVERY_ENABLED\?: string/);
   assert.match(workerSource, /isKaiResidenceBearerAuthorized\(request, env\.KAI_RESIDENCE_DISCORD_API_KEY\)/);
@@ -161,7 +161,7 @@ test('residence transport is separate from the harness and remains disabled by d
   assert.match(workerSource, /kai:residence-delivery:\$\{job\.job_key\}/);
   assert.match(workerSource, /kaiResidenceTransportReceiptId\(job, receipt\.sent_message_ids\)/);
   assert.match(workerSource, /canonicalMessage\.value\.content/);
-  assert.match(wrangler, /KAI_RESIDENCE_DISCORD_DELIVERY_ENABLED = "false"/);
+  assert.match(wrangler, /KAI_RESIDENCE_DISCORD_DELIVERY_ENABLED = "true"/);
   assert.match(wrangler, /KAI_RESIDENCE_DISCORD_API_KEY: Dedicated bearer token/);
   assert.doesNotMatch(workerSource, /kai:residence-delivery:\$\{responseEventId\}/);
 });
