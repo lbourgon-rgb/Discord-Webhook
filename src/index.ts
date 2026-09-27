@@ -26,6 +26,7 @@ import {
   isKaiResidenceBearerAuthorized,
   kaiResidenceChannelId,
   kaiResidenceJobFingerprint,
+  kaiResidenceImageAttachments,
   kaiResidenceTransportReceiptId,
   parseKaiResidenceDeliveryJob,
   validateKaiResidenceDeliveryProof,
@@ -4066,6 +4067,9 @@ export class CompanionBot extends McpAgent<Env> {
         },
         timestamp: String(message?.timestamp || ''),
         attachments: Array.isArray(message?.attachments) ? message.attachments.length : 0,
+        ...(url.pathname === '/api/residence/kaisoryth/read-messages'
+          ? { image_attachments: kaiResidenceImageAttachments(message?.attachments, channelId) }
+          : {}),
         reply_to: /^\d+$/.test(String(message?.message_reference?.message_id || ''))
           ? String(message.message_reference.message_id)
           : null,

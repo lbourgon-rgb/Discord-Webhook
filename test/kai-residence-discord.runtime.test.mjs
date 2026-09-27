@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import {
   canonicalKaiResidenceMessage,
   kaiResidenceChannelId,
+  kaiResidenceImageAttachments,
   kaiResidenceTransportReceiptId,
   parseKaiResidenceDeliveryJob,
   validateKaiResidenceDeliveryProof,
@@ -11,6 +12,23 @@ import {
 
 const workerSource = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
 const wrangler = readFileSync(new URL('../wrangler.toml', import.meta.url), 'utf8');
+
+test('residence image references retain signed URLs only for current-channel image attachments', () => {
+  const attachment = { id: '456', filename: 'Kai.png', content_type: 'image/png', size: 512,
+    url: 'https://cdn.discordapp.com/attachments/123/456/Kai.png?ex=valid&hm=signed', secret: 'omit' };
+  assert.deepEqual(kaiResidenceImageAttachments([attachment], '123'), [{
+    id: '456', filename: 'Kai.png', content_type: 'image/png', size: 512, url: attachment.url,
+  }]);
+  for (const invalid of [
+    { url: 'https://evil.example/attachments/123/456/Kai.png' },
+    { url: 'https://cdn.discordapp.com/attachments/999/456/Kai.png' },
+    { url: 'https://cdn.discordapp.com/attachments/123/777/Kai.png' },
+    { url: 'https://cdn.discordapp.com/attachments/123/456/a%2Fb.png' },
+    { url: 'https://user@cdn.discordapp.com/attachments/123/456/Kai.png' },
+    { content_type: 'text/plain' },
+  ]) assert.deepEqual(kaiResidenceImageAttachments([{ ...attachment, ...invalid }], '123'), []);
+  assert.equal(kaiResidenceImageAttachments(Array(20).fill(attachment), '123').length, 6);
+});
 
 function job(overrides = {}) {
   return {

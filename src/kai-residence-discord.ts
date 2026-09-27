@@ -51,6 +51,31 @@ function positiveEpoch(value: unknown): number | null {
   return Number.isInteger(epoch) && epoch > 0 ? epoch : null;
 }
 
+// Transient inputs for the residence image tool. Never expose arbitrary attachment
+// metadata or URLs outside the requested, already-authorized Discord channel.
+export function kaiResidenceImageAttachments(value: unknown, channelId: string): Array<Record<string, unknown>> {
+  if (!Array.isArray(value) || !/^\d+$/.test(channelId)) return [];
+  return value.slice(0, 10).flatMap(raw => {
+    const item = asRecord(raw);
+    const id = boundedText(item.id, 32);
+    const filename = boundedText(item.filename, 255);
+    const contentType = boundedText(item.content_type, 100);
+    const rawUrl = boundedText(item.url, 4096);
+    if (!id || !/^\d+$/.test(id) || !filename || !contentType?.toLowerCase().startsWith('image/') || !rawUrl) return [];
+    try {
+      const url = new URL(rawUrl);
+      if (url.protocol !== 'https:' || url.port || url.username || url.password || url.hash
+        || !['cdn.discordapp.com', 'media.discordapp.net'].includes(url.hostname)) return [];
+      const match = url.pathname.match(/^\/attachments\/(\d+)\/(\d+)\/([^/]+)$/);
+      if (!match || match[1] !== channelId || match[2] !== id) return [];
+      const decoded = decodeURIComponent(match[3]);
+      if (!decoded || decoded === '.' || decoded === '..' || /[/\\?#\x00-\x1f]/.test(decoded)) return [];
+      return [{ id, filename, content_type: contentType, url: url.toString(),
+        ...(typeof item.size === 'number' && Number.isSafeInteger(item.size) && item.size >= 0 ? { size: item.size } : {}) }];
+    } catch { return []; }
+  }).slice(0, 6);
+}
+
 export function parseKaiResidenceDeliveryJob(value: unknown): ParseResult<KaiResidenceDeliveryJob> {
   const body = asRecord(value);
   const unexpected = Object.keys(body).find(key => !DELIVERY_JOB_KEYS.has(key));
